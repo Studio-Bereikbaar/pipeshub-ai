@@ -1,6 +1,13 @@
 services:
   pipeshub-ai:
-    image: pipeshubai/pipeshub-ai:${IMAGE_TAG:-latest}
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+      args:
+        VITE_SERVER_URL: http://85.214.63.233:3000
+        VITE_AUTH_URL: http://85.214.63.233:3000
+        VITE_BACKEND_URL: http://85.214.63.233:3000
+        VITE_IAM_URL: http://85.214.63.233:3000
     restart: always
     ports:
       - "8091:8091"
