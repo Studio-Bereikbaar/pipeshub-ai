@@ -1,8 +1,8 @@
 services:
   pipeshub-ai:
     build:
-      context: ../../
-      dockerfile: Dockerfile
+      context: ../..
+      dockerfile: deployment/docker-compose/Dockerfile
       args:
         VITE_SERVER_URL: http://85.214.63.233:3000
         VITE_AUTH_URL: http://85.214.63.233:3000
