@@ -60,6 +60,19 @@ RUN npm run build
 # Stage 4: Frontend build
 FROM base AS frontend-build
 WORKDIR /app/frontend
+
+# Build arguments for Vite environment variables
+ARG VITE_SERVER_URL=http://localhost:3000
+ARG VITE_AUTH_URL=http://localhost:3000
+ARG VITE_BACKEND_URL=http://localhost:3000
+ARG VITE_IAM_URL=http://localhost:3000
+
+# Set environment variables for build
+ENV VITE_SERVER_URL=$VITE_SERVER_URL
+ENV VITE_AUTH_URL=$VITE_AUTH_URL
+ENV VITE_BACKEND_URL=$VITE_BACKEND_URL
+ENV VITE_IAM_URL=$VITE_IAM_URL
+
 RUN mkdir -p packages
 COPY frontend/package*.json ./
 COPY frontend/packages ./packages/
