@@ -4,10 +4,10 @@ services:
       context: .
       dockerfile: deployment/docker-compose/Dockerfile
       args:
-        VITE_SERVER_URL: http://85.214.63.233:3000
-        VITE_AUTH_URL: http://85.214.63.233:3000
-        VITE_BACKEND_URL: http://85.214.63.233:3000
-        VITE_IAM_URL: http://85.214.63.233:3000
+        VITE_SERVER_URL: https://wiki.studiobereikbaar.nl
+        VITE_AUTH_URL: https://wiki.studiobereikbaar.nl
+        VITE_BACKEND_URL: https://wiki.studiobereikbaar.nl
+        VITE_IAM_URL: https://wiki.studiobereikbaar.nl
     restart: always
     ports:
       - "8091:8091"
