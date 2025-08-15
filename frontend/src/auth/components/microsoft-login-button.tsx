@@ -54,7 +54,7 @@ function MicrosoftLoginButton({
           auth: {
             clientId,
             authority,
-            redirectUri: window.location.origin + '/auth/microsoft/callback',
+            redirectUri: window.location.origin,
           },
           cache: {
             cacheLocation: 'sessionStorage',
