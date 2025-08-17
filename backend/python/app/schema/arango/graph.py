@@ -65,7 +65,7 @@ EDGE_DEFINITIONS = [
     {
         "edge_collection": CollectionNames.IS_OF_TYPE.value,
         "from_vertex_collections": [CollectionNames.RECORDS.value],
-        "to_vertex_collections": [CollectionNames.FILES.value],
+        "to_vertex_collections": [CollectionNames.FILES.value, CollectionNames.MAILS.value, CollectionNames.WEBPAGES.value, CollectionNames.TICKETS.value],
     },
     {
         "edge_collection": CollectionNames.RECORD_RELATIONS.value,
@@ -86,5 +86,10 @@ EDGE_DEFINITIONS = [
         "edge_collection": CollectionNames.ORG_APP_RELATION.value,
         "from_vertex_collections": [CollectionNames.ORGS.value],
         "to_vertex_collections": [CollectionNames.APPS.value],
+    },
+    {
+        "edge_collection": CollectionNames.TEMPLATE_ACCESS.value,
+        "from_vertex_collections": [CollectionNames.USERS.value],
+        "to_vertex_collections": [CollectionNames.AGENT_INSTANCES.value],
     },
 ]

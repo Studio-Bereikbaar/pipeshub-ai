@@ -1,33 +1,26 @@
 import json
 from typing import List, Optional
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import Resource
-
-from app.agents.actions.google.auth.auth import calendar_auth
-from app.agents.actions.google.google_calendar.config import GoogleCalendarConfig
 from app.agents.tools.decorator import tool
 from app.agents.tools.enums import ParameterType
 from app.agents.tools.models import ToolParameter
-from app.utils.time_conversion import parse_timestamp
+from app.utils.time_conversion import prepare_iso_timestamps
 
 
 class GoogleCalendar:
     """Google Calendar tool exposed to the agents"""
-    def __init__(self, config: GoogleCalendarConfig) -> None:
+    def __init__(self, client: object, calendar_id: str = "primary") -> None:
         """Initialize the Google Calendar tool"""
         """
         Args:
-            config: Google Calendar configuration
+            client: Google Calendar client
+            calendar_id: The ID of the calendar to use
         Returns:
             None
         """
-        self.config = config
-        self.calendar_id = config.calendar_id or 'primary'
-        self.service: Optional[Resource] = None
-        self.credentials: Optional[Credentials] = None
+        self.client = client
+        self.calendar_id = calendar_id
 
-    @calendar_auth()
     @tool(
         app_name="google_calendar",
         tool_name="get_calendar_events"
@@ -38,19 +31,18 @@ class GoogleCalendar:
         """Get calendar events"""
         """
         Args:
-            config: Google Calendar Event configuration
+            calendar_id: The ID of the calendar to use
         Returns:
             tuple[bool, str]: True if the events are fetched, False otherwise
         """
         try:
             # TODO: Add pagination
-            events = self.service.events().list(calendarId=self.calendar_id).execute() # type: ignore
+            events = self.client.events().list(calendarId=self.calendar_id).execute() # type: ignore
             return True, json.dumps(events)
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
 
-    @calendar_auth()
     @tool(
         app_name="google_calendar",
         tool_name="create_calendar_event",
@@ -153,17 +145,16 @@ class GoogleCalendar:
             if not event_end_time:
                 return False, json.dumps({"error": "Event end time is required"})
 
-            event_start_time = str(parse_timestamp(event_start_time))
-            event_end_time = str(parse_timestamp(event_end_time))
+            event_start_time_iso, event_end_time_iso = prepare_iso_timestamps(event_start_time, event_end_time)
 
             event_config = {
                 "summary": event_title,
                 "description": event_description,
                 "start": {
-                    "dateTime": event_start_time,
+                    "dateTime": event_start_time_iso,
                 },
                 "end": {
-                    "dateTime": event_end_time,
+                    "dateTime": event_end_time_iso,
                 },
                 "location": event_location,
                 "organizer": {
@@ -184,10 +175,9 @@ class GoogleCalendar:
                 }
 
             if event_all_day:
-                event_config["start"] = {"date": event_start_time.split("T")[0]}
-                event_config["end"] = {"date": event_end_time.split("T")[0]}
-
-            event = self.service.events().insert( # type: ignore
+                event_config["start"] = {"date": event_start_time_iso.split("T")[0]}
+                event_config["end"] = {"date": event_end_time_iso.split("T")[0]}
+            event = self.client.events().insert( # type: ignore
                 calendarId=self.calendar_id,
                 body=event_config,
             ).execute() # type: ignore
@@ -207,7 +197,6 @@ class GoogleCalendar:
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @calendar_auth()
     @tool(
         app_name="google_calendar",
         tool_name="update_calendar_event",
@@ -313,7 +302,7 @@ class GoogleCalendar:
             tuple[bool, str]: True if the event is updated, False otherwise
         """
         try:
-            event = self.service.events().get( # type: ignore
+            event = self.client.events().get( # type: ignore
                 calendarId=self.calendar_id,
                 eventId=event_id,
             ).execute() # type: ignore
@@ -341,17 +330,15 @@ class GoogleCalendar:
                 event["timeZone"] = event_timezone
 
             if event_start_time and event_end_time:
-                event_start_time = str(parse_timestamp(event_start_time))
-                event_end_time = str(parse_timestamp(event_end_time))
-
+                event_start_time_iso, event_end_time_iso = prepare_iso_timestamps(event_start_time, event_end_time)
                 if event_all_day:
-                    event["start"] = {"date": event_start_time.split("T")[0]}
-                    event["end"] = {"date": event_end_time.split("T")[0]}
+                    event["start"] = {"date": event_start_time_iso.split("T")[0]}
+                    event["end"] = {"date": event_end_time_iso.split("T")[0]}
                 else:
-                    event["start"] = {"dateTime": event_start_time}
-                    event["end"] = {"dateTime": event_end_time}
+                    event["start"] = {"dateTime": event_start_time_iso}
+                    event["end"] = {"dateTime": event_end_time_iso}
 
-            updated_event = self.service.events().update( # type: ignore
+            updated_event = self.client.events().update( # type: ignore
                 calendarId=self.calendar_id,
                 eventId=event_id,
                 body=event,
@@ -372,7 +359,6 @@ class GoogleCalendar:
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @calendar_auth()
     @tool(
         app_name="google_calendar",
         tool_name="delete_calendar_event",
@@ -397,7 +383,7 @@ class GoogleCalendar:
             tuple[bool, str]: True if the event is deleted, False otherwise
         """
         try:
-            self.service.events().delete( # type: ignore
+            self.client.events().delete( # type: ignore
                 calendarId=self.calendar_id,
                 eventId=event_id,
             ).execute() # type: ignore
@@ -408,7 +394,6 @@ class GoogleCalendar:
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @calendar_auth()
     @tool(
         app_name="google_calendar",
         tool_name="get_calendar_list"
@@ -420,12 +405,11 @@ class GoogleCalendar:
             tuple[bool, str]: True if the calendar list is retrieved, False otherwise
         """
         try:
-            calendars = self.service.calendarList().list().execute() # type: ignore
+            calendars = self.client.calendarList().list().execute() # type: ignore
             return True, json.dumps(calendars)
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @calendar_auth()
     @tool(
         app_name="google_calendar",
         tool_name="get_calendar_list_by_id"
@@ -439,7 +423,7 @@ class GoogleCalendar:
             tuple[bool, str]: True if the calendar is retrieved, False otherwise
         """
         try:
-            calendar = self.service.calendars().get(calendarId=self.calendar_id).execute() # type: ignore
+            calendar = self.client.calendars().get(calendarId=self.calendar_id).execute() # type: ignore
             return True, json.dumps(calendar)
         except Exception as e:
             return False, json.dumps({"error": str(e)})

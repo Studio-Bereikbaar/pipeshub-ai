@@ -1,8 +1,5 @@
-import type { Icon as IconifyIcon } from '@iconify/react';
-
 import { useRef, useState } from 'react';
 import closeIcon from '@iconify-icons/eva/close-outline';
-import googleIcon from '@iconify-icons/eva/google-outline';
 
 import {
   Box,
@@ -21,11 +18,12 @@ import { Iconify } from 'src/components/iconify';
 import GoogleWorkSpaceConfigForm from './google-workspace-config-company-form';
 
 import type { GoogleWorkspaceConfigFormRef } from './google-workspace-config-company-form';
+import AtlassianConfigForm, { AtlassianConfigFormRef } from './atlassian-config-form';
 
 // Method configurations
 interface ConnectorConfigType {
   [key: string]: {
-    icon: React.ComponentProps<typeof IconifyIcon>['icon'];
+    src: string;
     title: string;
     color: string;
   };
@@ -33,9 +31,14 @@ interface ConnectorConfigType {
 
 const CONNECTOR_CONFIG: ConnectorConfigType = {
   googleWorkspace: {
-    icon: googleIcon,
+    src: '/assets/icons/connectors/google.svg',
     title: 'Google Workspace',
     color: '#4285F4',
+  },
+  atlassian: {
+    src: '/assets/icons/connectors/atlassian.svg',
+    title: 'Atlassian',
+    color: '#0052CC',
   },
 };
 
@@ -65,6 +68,7 @@ const ConfigureConnectorDialog = ({
   const [isValid, setIsValid] = useState(false);
 
   const googleWorkspaceFormRef = useRef<GoogleWorkspaceConfigFormRef>(null);
+  const atlassianFormRef = useRef<AtlassianConfigFormRef>(null);
 
   // Get connector config if available
   const connectorConfig = connectorType ? CONNECTOR_CONFIG[connectorType] : null;
@@ -82,6 +86,9 @@ const ConfigureConnectorDialog = ({
     switch (connectorType) {
       case 'googleWorkspace':
         currentRef = googleWorkspaceFormRef;
+        break;
+      case 'atlassian':
+        currentRef = atlassianFormRef;
         break;
       default:
         currentRef = null;
@@ -146,7 +153,7 @@ const ConfigureConnectorDialog = ({
                   color: connectorConfig.color,
                 }}
               >
-                <Iconify icon={connectorConfig.icon} width={18} height={18} />
+                <img src={connectorConfig.src} alt={connectorConfig.title} width={18} height={18} />
               </Box>
               Configure {connectorConfig.title} Integration
             </Box>
@@ -178,6 +185,14 @@ const ConfigureConnectorDialog = ({
                   onSaveSuccess={handleFormSaveSuccess}
                   onFileRemoved={() => onFileRemoved('googleWorkspace')} //
                   ref={googleWorkspaceFormRef}
+                  isEnabled={isEnabled || false}
+                />
+              )}
+              {connectorType === 'atlassian' && (
+                <AtlassianConfigForm
+                  onValidationChange={handleValidationChange}
+                  onSaveSuccess={handleFormSaveSuccess}
+                  ref={atlassianFormRef}
                   isEnabled={isEnabled || false}
                 />
               )}

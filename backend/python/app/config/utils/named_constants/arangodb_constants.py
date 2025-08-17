@@ -87,6 +87,8 @@ class CollectionNames(Enum):
     ATTACHMENTS = "attachments"
     LINKS = "links"
     MAILS = "mails"
+    WEBPAGES = "webpages"
+    TICKETS = "tickets"
 
     # Users and groups
     PEOPLE = "people"
@@ -128,6 +130,12 @@ class CollectionNames(Enum):
 
     BLOCKS = "blocks"
 
+    # Agent Builder collections
+    AGENT_TEMPLATES = "agentTemplates"
+    AGENT_INSTANCES = "agentInstances"
+    TEMPLATE_ACCESS = "templateAccess"
+
+
 
 class QdrantCollectionNames(Enum):
     RECORDS = "records"
@@ -162,6 +170,8 @@ class MimeTypes(Enum):
     XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     XLS = "application/vnd.ms-excel"
     CSV = "text/csv"
+    HTML = "text/html"
+    PLAIN_TEXT = "text/plain"
 
 
 class ProgressStatus(Enum):

@@ -8,6 +8,10 @@ from app.connectors.core.base.token_service.oauth_service import (
     OAuthProvider,
     OAuthToken,
 )
+from app.connectors.services.base_arango_service import BaseArangoService
+
+OAUTH_CONFIG_PATH = "/services/connectors/atlassian/config"
+OAUTH_CREDENTIALS_PATH = "/services/connectors/atlassian/credentials"
 
 
 class AtlassianScope(Enum):
@@ -21,6 +25,8 @@ class AtlassianScope(Enum):
     JIRA_PROJECT_MANAGE = "manage:jira-project"
     JIRA_CONFIGURATION_MANAGE = "manage:jira-configuration"
     JIRA_DATA_PROVIDER_MANAGE = "manage:jira-data-provider"
+    JIRA_PROJECT_READ = "read:jira-project"
+    JIRA_PROJECT_WRITE = "write:jira-project"
 
     # Confluence Scopes
     CONFLUENCE_CONTENT_READ = "read:content.all"
@@ -54,7 +60,9 @@ class AtlassianScope(Enum):
             cls.JIRA_WORK_READ.value,
             cls.JIRA_USER_READ.value,
             cls.ACCOUNT_READ.value,
-            cls.OFFLINE_ACCESS.value
+            cls.OFFLINE_ACCESS.value,
+            cls.JIRA_PROJECT_READ.value,
+            cls.JIRA_PROJECT_WRITE.value,
         ]
 
     @classmethod
@@ -79,6 +87,8 @@ class AtlassianScope(Enum):
             cls.JIRA_WORK_READ.value,
             cls.JIRA_WORK_WRITE.value,
             cls.JIRA_USER_READ.value,
+            cls.JIRA_PROJECT_READ.value,
+            cls.JIRA_PROJECT_WRITE.value,
             # Confluence
             cls.CONFLUENCE_CONTENT_READ.value,
             cls.CONFLUENCE_CONTENT_WRITE.value,
@@ -124,6 +134,8 @@ class AtlassianOAuthProvider(OAuthProvider):
         client_secret: str,
         redirect_uri: str,
         key_value_store: KeyValueStore,
+        base_arango_service: BaseArangoService,
+        credentials_path: str,
         scopes: Optional[List[str]] = None,
     ) -> None:
         """
@@ -151,8 +163,12 @@ class AtlassianOAuthProvider(OAuthProvider):
             }
         )
 
-        super().__init__(config, key_value_store)
+        super().__init__(config, key_value_store, base_arango_service, credentials_path)
         self._accessible_resources: Optional[List[AtlassianCloudResource]] = None
+
+    @staticmethod
+    def get_name() -> str:
+        return "atlassian"
 
     def get_provider_name(self) -> str:
         return "atlassian"
@@ -167,20 +183,14 @@ class AtlassianOAuthProvider(OAuthProvider):
             return await resp.json()
 
     async def handle_callback(self, code: str, state: str) -> OAuthToken:
-        token = await super().handle_callback(code, state, save_token=False)
-        identity = await self.get_identity(token)
-        id = identity['email'] if 'email' in identity else identity['account_id']
-        await self.key_value_store.create_key(f"{self.get_provider_name()}/{id}", token.to_dict())
+        token = await super().handle_callback(code, state)
+        # identity = await self.get_identity(token)
+        # email = identity.get('email')
+        # if not email:
+        #     raise Exception("User email not found in Atlassian identity response")
+        # user = await self.base_arango_service.get_user_by_email(email)
+
 
         return token
 
-    async def get_token(self, id: str) -> Optional[OAuthToken]:
-        token = await self.key_value_store.get_key(f"{self.get_provider_name()}/{id}")
-        if not token:
-            return None
-        token = OAuthToken.from_dict(token)
-        if token.is_expired:
-            token = await self.refresh_access_token(token.refresh_token)
-            await self.key_value_store.create_key(f"{self.get_provider_name()}/{id}", token.to_dict())
-        return token
 

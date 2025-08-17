@@ -1,6 +1,6 @@
 import uuid
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from arango.database import TransactionDatabase
 
@@ -15,6 +15,9 @@ from app.models.entities import (
     MessageRecord,
     Record,
     RecordGroup,
+    RecordType,
+    TicketRecord,
+    WebpageRecord,
 )
 from app.models.permission import EntityType, Permission
 from app.models.users import User, UserGroup
@@ -43,6 +46,8 @@ read_collections = [
     CollectionNames.RECORD_GROUPS.value,
     CollectionNames.FILES.value,
     CollectionNames.MAILS.value,
+    CollectionNames.TICKETS.value,
+    CollectionNames.WEBPAGES.value,
     # CollectionNames.MESSAGES.value,
     CollectionNames.USERS.value,
     # CollectionNames.USER_GROUPS.value,
@@ -62,6 +67,9 @@ write_collections = [
     CollectionNames.RECORD_GROUPS.value,
     CollectionNames.FILES.value,
     CollectionNames.MAILS.value,
+    CollectionNames.WEBPAGES.value,
+    CollectionNames.TICKETS.value,
+    # CollectionNames.MESSAGES.value,
     # CollectionNames.MESSAGES.value,
     CollectionNames.USERS.value,
     # CollectionNames.USER_GROUPS.value,
@@ -109,7 +117,7 @@ class DataSourceEntitiesProcessor:
             parent_record = await self.arango_service.get_record_by_external_id(connector_name=record.connector_name,
                                                                                 external_id=record.parent_external_record_id, transaction=transaction)
 
-            if parent_record is None:
+            if parent_record is None and record.parent_record_type is RecordType.FILE.value and record.record_type is RecordType.FILE.value:
                 # Create a new parent record
                 parent_record = FileRecord(
                     org_id=self.org_id,
@@ -174,56 +182,63 @@ class DataSourceEntitiesProcessor:
             )
 
     async def _handle_new_record(self, record: Record, transaction: TransactionDatabase) -> None:
-        is_of_type_record = None
+        # Set org_id for the record
         record.org_id = self.org_id
-        if isinstance(record, FileRecord):
-            is_of_type_record = {
-                "_from": f"{CollectionNames.RECORDS.value}/{record.id}",
-                "_to": f"{CollectionNames.FILES.value}/{record.id}",
-                "createdAtTimestamp": get_epoch_timestamp_in_ms(),
-                "updatedAtTimestamp": get_epoch_timestamp_in_ms(),
-                }
-            await self.arango_service.batch_upsert_nodes(
-                [record.to_arango_base_record()], collection=CollectionNames.RECORDS.value, transaction=transaction
-            )
-            await self.arango_service.batch_upsert_nodes(
-                [record.to_arango_file_record()], collection=CollectionNames.FILES.value, transaction=transaction
-            )
-            await self.arango_service.batch_create_edges(
-                [is_of_type_record], collection=CollectionNames.IS_OF_TYPE.value, transaction=transaction
-            )
-        if isinstance(record, MailRecord):
-            is_of_type_record = {
-                "_from": f"{CollectionNames.RECORDS.value}/{record.id}",
-                "_to": f"{CollectionNames.MAILS.value}/{record.id}",
-                "createdAtTimestamp": get_epoch_timestamp_in_ms(),
-                "updatedAtTimestamp": get_epoch_timestamp_in_ms(),
-            }
-            await self.arango_service.batch_upsert_nodes(
-                [record.to_arango_base_record()], collection=CollectionNames.RECORDS.value, transaction=transaction
-            )
-            await self.arango_service.batch_upsert_nodes(
-                [record.to_arango_mail_record()], collection=CollectionNames.MAILS.value, transaction=transaction
-            )
-            await self.arango_service.batch_create_edges(
-                [is_of_type_record], collection=CollectionNames.IS_OF_TYPE.value, transaction=transaction
-            )
-        if isinstance(record, MessageRecord):
-            is_of_type_record = {
-                "_from": f"{CollectionNames.RECORDS.value}/{record.id}",
-                "_to": f"{CollectionNames.MESSAGES.value}/{record.id}",
-                "createdAtTimestamp": get_epoch_timestamp_in_ms(),
-                "updatedAtTimestamp": get_epoch_timestamp_in_ms(),
-            }
-            await self.arango_service.batch_upsert_nodes(
-                [record.to_arango_base_record()], collection=CollectionNames.RECORDS.value, transaction=transaction
-            )
-            await self.arango_service.batch_upsert_nodes(
-                [record.to_arango_message_record()], collection=CollectionNames.MESSAGES.value, transaction=transaction
-            )
-            await self.arango_service.batch_create_edges(
-                [is_of_type_record], collection=CollectionNames.IS_OF_TYPE.value, transaction=transaction
-            )
+
+        # Define record type configurations
+        record_type_config = {
+            FileRecord: {
+                "collection": CollectionNames.FILES.value,
+            },
+            MailRecord: {
+                "collection": CollectionNames.MAILS.value,
+            },
+            MessageRecord: {
+                "collection": CollectionNames.MESSAGES.value,
+            },
+            WebpageRecord: {
+                "collection": CollectionNames.WEBPAGES.value,
+            },
+            TicketRecord: {
+                "collection": CollectionNames.TICKETS.value,
+            },
+        }
+
+        # Get the configuration for the current record type
+        record_type = type(record)
+        if record_type not in record_type_config:
+            self.logger.warning(f"Unsupported record type: {record_type}")
+            return
+
+        config = record_type_config[record_type]
+
+        # Create the IS_OF_TYPE edge
+        is_of_type_record = {
+            "_from": f"{CollectionNames.RECORDS.value}/{record.id}",
+            "_to": f"{config['collection']}/{record.id}",
+            "createdAtTimestamp": get_epoch_timestamp_in_ms(),
+            "updatedAtTimestamp": get_epoch_timestamp_in_ms(),
+        }
+
+        # Upsert base record
+        await self.arango_service.batch_upsert_nodes(
+            [record.to_arango_base_record()],
+            collection=CollectionNames.RECORDS.value,
+            transaction=transaction
+        )
+        # Upsert specific record type if it has a specific method
+        await self.arango_service.batch_upsert_nodes(
+            [record.to_arango_record()],
+            collection=config["collection"],
+            transaction=transaction
+        )
+
+        # Create IS_OF_TYPE edge
+        await self.arango_service.batch_create_edges(
+            [is_of_type_record],
+            collection=CollectionNames.IS_OF_TYPE.value,
+            transaction=transaction
+        )
 
 
     async def _handle_record_permissions(self, record: Record, permissions: List[Permission], transaction: TransactionDatabase) -> None:
@@ -273,7 +288,7 @@ class DataSourceEntitiesProcessor:
             )
 
 
-    async def _process_record(self, record: Record, permissions: List[Permission], transaction: TransactionDatabase) -> None:
+    async def _process_record(self, record: Record, permissions: List[Permission], transaction: TransactionDatabase) -> Optional[Record]:
         existing_record = await self.arango_service.get_record_by_external_id(connector_name=record.connector_name,
                                                                                     external_id=record.external_record_id, transaction=transaction)
 
@@ -299,25 +314,34 @@ class DataSourceEntitiesProcessor:
         # Create record if it doesn't exist
         # Record download function
         # Create a permission edge between the record and the app with sync status if it doesn't exist
-
         if existing_record is None:
-            await self.messaging_producer.send_message(
-                "record-events",
-                {"eventType": "newRecord", "timestamp": get_epoch_timestamp_in_ms(), "payload": record.to_kafka_record()},
-                key=record.id
-            )
+            return record
+
+        return None
 
     async def on_new_records(self, records_with_permissions: List[Tuple[Record, List[Permission]]]) -> None:
         try:
+            records_to_publish = []
+
             transaction = self.arango_service.db.begin_transaction(
                     read=read_collections,
                     write=write_collections,
             )
             # Create a transaction
             for record, permissions in records_with_permissions:
-                await self._process_record(record, permissions, transaction)
+                processed_record = await self._process_record(record, permissions, transaction)
+                if processed_record:
+                    records_to_publish.append(processed_record)
 
             transaction.commit_transaction()
+
+            if records_to_publish:
+                for record in records_to_publish:
+                    await self.messaging_producer.send_message(
+                            "record-events",
+                            {"eventType": "newRecord", "timestamp": get_epoch_timestamp_in_ms(), "payload": record.to_kafka_record()},
+                            key=record.id
+                        )
         except Exception as e:
             self.logger.error(f"Error in on_new_records: {str(e)}")
             transaction.abort_transaction()
@@ -338,19 +362,20 @@ class DataSourceEntitiesProcessor:
     async def on_record_deleted(self, record_id: str) -> None:
         await self.arango_service.delete_record(record_id)
 
-    async def on_new_record_groups(self, record_groups: List[RecordGroup], permissions: List[Permission]) -> None:
+    async def on_new_record_groups(self, record_groups: List[Tuple[RecordGroup, List[Permission]]]) -> None:
         # Create a transaction
         transaction = self.arango_service.db.begin_transaction(
                     read=read_collections,
                     write=write_collections,
             )
-        for record_group in record_groups:
+        for record_group, permissions in record_groups:
+            record_group.org_id = self.org_id
+
             self.logger.info(f"Processing record group: {record_group}")
             existing_record_group = await self.arango_service.get_record_group_by_external_id(connector_name=record_group.connector_name,
                                                                                             external_id=record_group.external_group_id, transaction=transaction)
             if existing_record_group is None:
                 record_group.id = str(uuid.uuid4())
-                record_group.org_id = self.org_id
                 # Create a permission edge between the record group and the org if it doesn't exist
                 # Create a permission edge between the record group and the user if it doesn't exist
                 # Create a permission edge between the record group and the user group if it doesn't exist

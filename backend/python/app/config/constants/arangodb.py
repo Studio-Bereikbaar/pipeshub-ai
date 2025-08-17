@@ -99,6 +99,8 @@ class CollectionNames(Enum):
     LINKS = "links"
     MAILS = "mails"
     MESSAGES = "messages"
+    WEBPAGES = "webpages"
+    TICKETS = "tickets"
 
     # Users and groups
     PEOPLE = "people"
@@ -149,6 +151,10 @@ class CollectionNames(Enum):
     NOTION_DATABASE_RECORD="notionDatabaseRecord"
     BELONGS_TO_RECORD_GROUP="belongsToRecordGroup"
 
+    # Agent Builder collections
+    AGENT_TEMPLATES = "agentTemplates"
+    AGENT_INSTANCES = "agentInstances"
+    TEMPLATE_ACCESS = "templateAccess"
 
 
 class QdrantCollectionNames(Enum):
@@ -187,6 +193,8 @@ class MimeTypes(Enum):
     BIN = "application/octet-stream"
     NOTION_TEXT = "notion/text"
     NOTION_PAGE_COMMENT_TEXT = "notion/pageCommentText"
+    HTML = "text/html"
+    PLAIN_TEXT = "text/plain"
 
 
 class ProgressStatus(Enum):

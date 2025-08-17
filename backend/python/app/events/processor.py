@@ -11,6 +11,8 @@ from app.config.constants.arangodb import (
     ExtensionTypes,
 )
 from app.config.constants.service import config_node_constants
+from app.config.utils.named_constants.arangodb_constants import MimeTypes
+from app.models.entities import RecordType
 from app.modules.parsers.pdf.ocr_handler import OCRHandler
 from app.utils.llm import get_llm
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
@@ -1422,7 +1424,7 @@ class Processor:
         return ordered_items
 
     async def process_html_document(
-        self, recordName, recordId, version, source, orgId, html_content, virtual_record_id
+        self, recordName, recordId, version, source, orgId, html_content, virtual_record_id, origin, recordType
     ) -> None:
         """Process HTML document and extract structured content"""
         self.logger.info(
@@ -1468,10 +1470,13 @@ class Processor:
                     record = await self.domain_extractor.save_metadata_to_db(
                         orgId, recordId, metadata, virtual_record_id
                     )
-                    file = await self.arango_service.get_document(
-                        recordId, CollectionNames.FILES.value
-                    )
-                    domain_metadata = {**record, **file}
+                    if recordType == RecordType.FILE.value:
+                        file = await self.arango_service.get_document(
+                            recordId, CollectionNames.FILES.value
+                        )
+                        domain_metadata = {**record, **file}
+                    else:
+                        domain_metadata = record
 
                 except Exception as e:
                     self.logger.error(f"❌ Error extracting metadata: {str(e)}")
@@ -1505,11 +1510,16 @@ class Processor:
                             "text": item["text"].strip(),
                             "metadata": {
                                 **(domain_metadata or {}),
+                                "recordName": recordName,
                                 "recordId": recordId,
                                 "blockType": context.get("label", "text"),
                                 "blockNum": [idx],
                                 "blockText": json.dumps(full_context),
                                 "virtualRecordId": virtual_record_id,
+                                "mimeType": MimeTypes.HTML.value,
+                                "connectorName": source,
+                                "origin": origin,
+                                "recordType": recordType,
                             },
                         }
                     )
@@ -1784,7 +1794,7 @@ class Processor:
             raise
 
     async def process_txt_document(
-        self, recordName, recordId, version, source, orgId, txt_binary, virtual_record_id
+        self, recordName, recordId, version, source, orgId, txt_binary, virtual_record_id, recordType, connectorName, origin
     ) -> None:
         """Process TXT document and extract structured content"""
         self.logger.info(
@@ -1861,11 +1871,17 @@ class Processor:
                         "text": block,
                         "metadata": {
                             **(domain_metadata or {}),
+                            "recordName": recordName,
+                            "orgId": orgId,
                             "recordId": recordId,
                             "blockType": "text",
                             "blockNum": [idx],
                             "blockText": json.dumps(full_context),
                             "virtualRecordId": virtual_record_id,
+                            "recordType": recordType,
+                            "connectorName": connectorName,
+                            "origin": origin,
+                            "mimeType": MimeTypes.PLAIN_TEXT.value,
                         },
                     }
                 )

@@ -2,33 +2,24 @@ import json
 import logging
 from typing import BinaryIO, Optional
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import Resource
-
-from app.agents.actions.google.auth.auth import drive_auth
-from app.agents.actions.google.google_drive.config import GoogleDriveConfig
 from app.agents.tools.decorator import tool
 from app.agents.tools.enums import ParameterType
 from app.agents.tools.models import ToolParameter
 
 logger = logging.getLogger(__name__)
 
-
 class GoogleDrive:
     """Google Drive tool exposed to the agents"""
-    def __init__(self, config: GoogleDriveConfig) -> None:
+    def __init__(self, client: object) -> None:
         """Initialize the Google Drive tool"""
         """
         Args:
-            config: Google Drive configuration
+            client: Authenticated Google Drive client
         Returns:
             None
         """
-        self.config = config
-        self.service: Optional[Resource] = None
-        self.credentials: Optional[Credentials] = None
+        self.client = client
 
-    @drive_auth()
     @tool(
         app_name="google_drive",
         tool_name="get_files_list",
@@ -58,7 +49,7 @@ class GoogleDrive:
         """
         try:
             query = f"'{folder_id or 'root'}' in parents and trashed=false"
-            files = self.service.files().list( # type: ignore
+            files = self.client.files().list( # type: ignore
                 q=query,
                 spaces="drive",
                 fields="nextPageToken, files(id, name, mimeType, size, webViewLink, md5Checksum, sha1Checksum, sha256Checksum, headRevisionId, parents, createdTime, modifiedTime, trashed, trashedTime, fileExtension)",
@@ -74,7 +65,6 @@ class GoogleDrive:
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @drive_auth()
     @tool(
         app_name="google_drive",
         tool_name="create_folder",
@@ -96,7 +86,7 @@ class GoogleDrive:
             tuple[bool, str]: True if the folder is created, False otherwise
         """
         try:
-            folder = self.service.files().create( # type: ignore
+            folder = self.client.files().create( # type: ignore
                 body={
                     "name": folder_name,
                     "mimeType": "application/vnd.google-apps.folder",
@@ -111,7 +101,6 @@ class GoogleDrive:
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @drive_auth()
     @tool(
         app_name="google_drive",
         tool_name="upload_file",
@@ -148,7 +137,7 @@ class GoogleDrive:
             tuple[bool, str]: True if the file is uploaded, False otherwise
         """
         try:
-            file = self.service.files().create( # type: ignore
+            file = self.client.files().create( # type: ignore
                 media_body=file_content,
                 body={
                     "name": file_name,
@@ -166,7 +155,6 @@ class GoogleDrive:
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @drive_auth()
     @tool(
         app_name="google_drive",
         tool_name="download_file",
@@ -189,13 +177,13 @@ class GoogleDrive:
             tuple[bool, Optional[BinaryIO]]: True if the file is downloaded, False otherwise
         """
         try:
-            file = self.service.files().get_media(fileId=file_id).execute() # type: ignore
+            file = self.client.files().get_media(fileId=file_id).execute() # type: ignore
             return True, file
         except Exception as e:
             logger.error(f"Failed to download file {file_id}: {e}")
             return False, None
 
-    @drive_auth()
+
     @tool(
         app_name="google_drive",
         tool_name="delete_file",
@@ -218,14 +206,13 @@ class GoogleDrive:
             tuple[bool, str]: True if the file is deleted, False otherwise
         """
         try:
-            self.service.files().delete(fileId=file_id).execute() # type: ignore
+            self.client.files().delete(fileId=file_id).execute() # type: ignore
             return True, json.dumps({
                 "message": f"File {file_id} deleted successfully"
             })
         except Exception as e:
             return False, json.dumps({"error": str(e)})
 
-    @drive_auth()
     @tool(
         app_name="google_drive",
         tool_name="get_file_details",
@@ -248,7 +235,7 @@ class GoogleDrive:
             tuple[bool, str]: True if the file details are retrieved, False otherwise
         """
         try:
-            file = self.service.files().get(fileId=file_id).execute() # type: ignore
+            file = self.client.files().get(fileId=file_id).execute() # type: ignore
             return True, json.dumps({
                 "file_id": file.get("id", ""),
                 "file_name": file.get("name", ""),

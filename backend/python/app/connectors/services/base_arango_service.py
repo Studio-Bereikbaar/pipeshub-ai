@@ -24,6 +24,8 @@ from app.config.constants.service import DefaultEndpoints, config_node_constants
 from app.connectors.services.kafka_service import KafkaService
 from app.models.entities import Record, RecordGroup, User
 from app.schema.arango.documents import (
+    agent_schema,
+    agent_template_schema,
     app_schema,
     department_schema,
     file_record_schema,
@@ -31,7 +33,9 @@ from app.schema.arango.documents import (
     orgs_schema,
     record_group_schema,
     record_schema,
+    ticket_record_schema,
     user_schema,
+    webpage_record_schema,
 )
 from app.schema.arango.edges import (
     basic_edge_schema,
@@ -39,6 +43,7 @@ from app.schema.arango.edges import (
     is_of_type_schema,
     permissions_schema,
     record_relations_schema,
+    role_based_edge_schema,
     user_app_relation_schema,
     user_drive_relation_schema,
 )
@@ -52,6 +57,7 @@ NODE_COLLECTIONS = [
     (CollectionNames.FILES.value, file_record_schema),
     (CollectionNames.LINKS.value, None),
     (CollectionNames.MAILS.value, mail_record_schema),
+    (CollectionNames.WEBPAGES.value, webpage_record_schema),
     (CollectionNames.PEOPLE.value, None),
     (CollectionNames.USERS.value, user_schema),
     (CollectionNames.GROUPS.value, None),
@@ -68,7 +74,11 @@ NODE_COLLECTIONS = [
     (CollectionNames.SUBCATEGORIES2.value, None),
     (CollectionNames.SUBCATEGORIES3.value, None),
     (CollectionNames.BLOCKS.value, None),
-    (CollectionNames.RECORD_GROUPS.value, record_group_schema)
+    (CollectionNames.RECORD_GROUPS.value, record_group_schema),
+    (CollectionNames.AGENT_INSTANCES.value, agent_schema),
+    (CollectionNames.AGENT_TEMPLATES.value, agent_template_schema),
+    (CollectionNames.TICKETS.value, ticket_record_schema),
+
 ]
 
 EDGE_COLLECTIONS = [
@@ -87,6 +97,7 @@ EDGE_COLLECTIONS = [
     (CollectionNames.BELONGS_TO_RECORD_GROUP.value, basic_edge_schema),
     (CollectionNames.INTER_CATEGORY_RELATIONS.value, basic_edge_schema),
     (CollectionNames.PERMISSIONS_TO_KB.value, permissions_schema),
+    (CollectionNames.TEMPLATE_ACCESS.value, role_based_edge_schema),
 ]
 
 class BaseArangoService:
@@ -2033,7 +2044,6 @@ class BaseArangoService:
 
         self.logger.info(f"✅ Drive edge deletion completed: {total_deleted} total edges deleted for record {record_id}")
 
-
     async def _delete_drive_anyone_permissions(self, transaction, record_id: str) -> None:
         """Delete Drive-specific 'anyone' permissions"""
         anyone_deletion_query = """
@@ -2946,7 +2956,6 @@ class BaseArangoService:
                 await self._publish_record_event("deleteRecord", payload)
         except Exception as e:
             self.logger.error(f"❌ Failed to publish Gmail deletion event: {str(e)}")
-
 
     async def batch_upsert_nodes(
         self,
