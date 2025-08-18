@@ -210,7 +210,9 @@ export class Application {
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'", "*", "'unsafe-inline'", "'unsafe-eval'", "data:", "blob:", "wss:", "ws:"],
-          connectSrc: ["'self'", "*"]
+          connectSrc: ["'self'", "*"],
+          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdnjs.cloudflare.com", "blob:"],
+          workerSrc: ["'self'", "blob:", "data:"]
         }
       }
     }));
