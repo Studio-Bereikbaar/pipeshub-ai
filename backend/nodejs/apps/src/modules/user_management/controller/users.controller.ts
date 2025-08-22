@@ -922,6 +922,7 @@ export class UserController {
         });
         return;
       }
+      let errorSendingMail = false;
 
       await this.eventService.start();
       for (let i = 0; i < emailsForNewAccounts.length; ++i) {
@@ -943,6 +944,18 @@ export class UserController {
           { $addToSet: { users: userId } }, // Add user to the group if not already present
         );
 
+        const event: Event = {
+          eventType: EventType.NewUserEvent,
+          timestamp: Date.now(),
+          payload: {
+            orgId: req.user?.orgId.toString(),
+            userId: userId,
+            email: email,
+            syncAction: 'immediate',
+          } as UserAddedEvent,
+        };
+        await this.eventService.publishEvent(event);
+
         const authToken = fetchConfigJwtGenerator(
           userId.toString(),
           req.user?.orgId,
@@ -977,7 +990,8 @@ export class UserController {
             },
           });
           if (result.statusCode !== 200) {
-            throw new InternalServerError('Error sending invite');
+            errorSendingMail = true;
+            continue;
           }
         } else {
           result = await this.mailService.sendMail({
@@ -997,22 +1011,11 @@ export class UserController {
             },
           });
           if (result.statusCode !== 200) {
-            throw new InternalServerError('Error sending invite');
+            errorSendingMail = true;
+            continue;
           }
         }
 
-        const event: Event = {
-          eventType: EventType.NewUserEvent,
-          timestamp: Date.now(),
-          payload: {
-            orgId: req.user?.orgId.toString(),
-            userId: userId,
-            email: email,
-            syncAction: 'immediate',
-          } as UserAddedEvent,
-        };
-
-        await this.eventService.publishEvent(event);
       }
 
       const emailsForRestoredAccounts = restoredUsers.map((user) => user.email);
@@ -1029,6 +1032,18 @@ export class UserController {
             'User ID missing while inviting restored user. Please ensure user restoration was successful.',
           );
         }
+        const event: Event = {
+          eventType: EventType.NewUserEvent,
+          timestamp: Date.now(),
+          payload: {
+            orgId: req.user?.orgId.toString(),
+            userId: userId,
+            email: email,
+            syncAction: 'immediate',
+          } as UserAddedEvent,
+        };
+        await this.eventService.publishEvent(event);
+
         const authToken = fetchConfigJwtGenerator(
           userId.toString(),
           req.user?.orgId,
@@ -1063,7 +1078,8 @@ export class UserController {
             },
           });
           if (result.statusCode !== 200) {
-            throw new InternalServerError('Error sending invite');
+            errorSendingMail = true;
+            continue;
           }
         } else {
           result = await this.mailService.sendMail({
@@ -1083,26 +1099,19 @@ export class UserController {
             },
           });
           if (result.statusCode !== 200) {
-            throw new InternalServerError('Error sending invite');
+            errorSendingMail = true;
+            continue;
           }
         }
+      }
 
-        const event: Event = {
-          eventType: EventType.NewUserEvent,
-          timestamp: Date.now(),
-          payload: {
-            orgId: req.user?.orgId.toString(),
-            userId: userId,
-            email: email,
-            syncAction: 'immediate',
-          } as UserAddedEvent,
-        };
+      await this.eventService.stop();
 
-        await this.eventService.publishEvent(event);
-        res.status(200).json({ message: 'Invite sent successfully' });
+      if (errorSendingMail) {
+        res.status(200).json({ message: 'Error sending mail invite. Check your SMTP configuration.' });
         return;
       }
-      await this.eventService.stop();
+
       res.status(200).json({ message: 'Invite sent successfully' });
     } catch (error) {
       next(error);

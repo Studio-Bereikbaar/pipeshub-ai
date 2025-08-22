@@ -32,6 +32,7 @@ interface DynamicFormProps {
   // Callbacks
   onValidationChange: (isValid: boolean, formData?: any) => void;
   onSaveSuccess?: () => void;
+  onProviderChange?: (newProviderId: string) => void; // New callback for provider changes
 
   // Data management
   getConfig: () => Promise<any>;
@@ -74,6 +75,7 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
     modelType, // Legacy support
     onValidationChange,
     onSaveSuccess,
+    onProviderChange, // New prop
     getConfig,
     updateConfig,
     title,
@@ -213,7 +215,7 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
     finalConfigType,
   ]);
 
-    // Config loading for non-stepper mode
+  // Config loading for non-stepper mode
   const fetchConfig = React.useCallback(
     async (forceRefresh = false) => {
       if (!stepperMode && (!formDataLoaded || forceRefresh)) {
@@ -433,7 +435,7 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
     currentProvider,
     updateConfig,
     onSaveSuccess,
-    fetchConfig
+    fetchConfig,
   ]);
 
   // Add legacy method alias
@@ -441,8 +443,6 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
   if (refMethods?.current) {
     refMethods.current.handleSubmit = refMethods.current.handleSave;
   }
-
-
 
   useEffect(() => {
     if (!stepperMode && !formDataLoaded) {
@@ -455,7 +455,7 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
     if (formContainerRef.current && !isSwitchingProvider && !isLoading) {
       const timer = setTimeout(() => {
         if (formContainerRef.current) {
-          const {height} = formContainerRef.current.getBoundingClientRect();
+          const { height } = formContainerRef.current.getBoundingClientRect();
           if (height > 0) {
             setProviderHeights((prev) => ({
               ...prev,
@@ -481,8 +481,14 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
 
   // Event handlers
   const handleProviderChange = (event: any, newValue: any) => {
-    if (newValue) {
-      switchProvider(newValue.id);
+    if (newValue && newValue.id !== currentProvider) {
+      // Call the callback to notify parent of provider change
+
+      if (onProviderChange) {
+        onProviderChange(newValue.id);
+      } else {
+        switchProvider(newValue.id);
+      }
     }
   };
 
@@ -495,7 +501,8 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
       const isLegacyModelType = ['llm', 'embedding'].includes(finalConfigType);
       if (isLegacyModelType && originalApiConfigRef.current) {
         // For legacy model types, reset to the original configuration
-        const originalProvider = originalApiConfigRef.current.providerType || originalApiConfigRef.current.modelType;
+        const originalProvider =
+          originalApiConfigRef.current.providerType || originalApiConfigRef.current.modelType;
         if (resetToProvider && originalProvider) {
           resetToProvider(originalProvider, originalApiConfigRef.current);
         }

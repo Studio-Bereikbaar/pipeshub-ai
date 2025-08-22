@@ -80,6 +80,7 @@ class CollectionNames(Enum):
     RECORDS = "records"
     RECORD_RELATIONS = "recordRelations"
     RECORD_GROUPS = "recordGroups"
+    SYNC_POINTS = "syncPoints"
 
     # Knowledge base
     KNOWLEDGE_BASE = "knowledgeBase"
@@ -155,11 +156,6 @@ class CollectionNames(Enum):
     AGENT_TEMPLATES = "agentTemplates"
     AGENT_INSTANCES = "agentInstances"
     TEMPLATE_ACCESS = "templateAccess"
-
-
-class QdrantCollectionNames(Enum):
-    RECORDS = "records"
-
 
 class ExtensionTypes(Enum):
     PDF = "pdf"

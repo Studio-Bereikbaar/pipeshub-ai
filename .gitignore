@@ -176,3 +176,10 @@ backend/python/default_config*.json
 test.txt
 image_*.png 
 *.log
+
+# Studio Bereikbaar documentation files
+CLAUDE.md
+docs/ARCHITECTURE.md
+docs/DEPLOYMENT.md
+docs/DEVELOPMENT.md
+docs/TECHNICAL.md

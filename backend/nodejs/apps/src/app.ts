@@ -204,15 +204,36 @@ export class Application {
   }
 
   private configureMiddleware(): void {
+    const isDev = process.env.NODE_ENV !== 'production';
     // Security middleware - configure helmet once with all options
     this.app.use(helmet({
-      crossOriginOpenerPolicy: { policy: "unsafe-none" }, // Required for MSAL popup login flow to work correctly
+      crossOriginOpenerPolicy: { policy: "unsafe-none" }, // Required for MSAL popup
       contentSecurityPolicy: {
         directives: {
-          defaultSrc: ["'self'", "*", "'unsafe-inline'", "'unsafe-eval'", "data:", "blob:", "wss:", "ws:"],
-          connectSrc: ["'self'", "*"],
-          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'", "https://cdnjs.cloudflare.com", "blob:"],
-          workerSrc: ["'self'", "blob:", "data:"]
+          defaultSrc: ["'self'"],
+          scriptSrc: [
+            "'self'",
+            ...(process.env.CSP_SCRIPT_SRCS?.split(',') ?? [
+              "https://cdnjs.cloudflare.com",
+              "https://login.microsoftonline.com",
+              "https://graph.microsoft.com",
+            ]),
+            ...(isDev ? ["'unsafe-inline'", "'unsafe-eval'"] : [])
+          ],
+          connectSrc: [
+            "'self'",
+            ...(process.env.CSP_CONNECT_SRCS?.split(',') ?? [
+              "https://login.microsoftonline.com",
+              "https://graph.microsoft.com",
+            ]),
+          ],
+          objectSrc: ["'self'", "data:", "blob:"], // PDF rendering
+          frameSrc: ["'self'", "blob:"], // PDF rendering in frames
+          workerSrc: ["'self'", "blob:"], // PDF.js workers
+          childSrc: ["'self'", "blob:"], // PDF rendering
+          imgSrc: ["'self'", "data:", "blob:", "https:"], // Images in PDFs
+          fontSrc: ["'self'", "data:", "https:"], // Fonts in PDFs
+          mediaSrc: ["'self'", "blob:", "data:"] // Media in PDFs
         }
       }
     }));
