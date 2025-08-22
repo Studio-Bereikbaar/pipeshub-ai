@@ -881,8 +881,19 @@ export class UserController {
           email: { $in: deletedEmails },
         });
       }
+
+      // Start event service if we have users to process
+      const hasUsersToProcess = existingUsers.length > 0 || deletedUsers.length > 0 || emails.filter(
+        (email) => !activeEmails.includes(email) && !deletedEmails.includes(email)
+      ).length > 0;
+      
+      if (hasUsersToProcess) {
+        await this.eventService.start();
+      }
+
       for (let i = 0; i < existingUsers.length; ++i) {
         const userId = existingUsers[i]?._id;
+        const email = existingUsers[i]?.email;
 
         await UserGroups.updateMany(
           { _id: { $in: groupIds }, orgId },
@@ -894,6 +905,19 @@ export class UserController {
           { orgId: req.user?.orgId, type: 'everyone' }, // Find the everyone group in the same org
           { $addToSet: { users: userId } }, // Add user to the group if not already present
         );
+
+        // Publish userAdded event to sync existing users to ArangoDB
+        const event: Event = {
+          eventType: EventType.NewUserEvent,
+          timestamp: Date.now(),
+          payload: {
+            orgId: req.user?.orgId.toString(),
+            userId: userId,
+            email: email,
+            syncAction: 'immediate',
+          } as UserAddedEvent,
+        };
+        await this.eventService.publishEvent(event);
       }
 
       // Filter emails that need new accounts
@@ -924,7 +948,6 @@ export class UserController {
       }
       let errorSendingMail = false;
 
-      await this.eventService.start();
       for (let i = 0; i < emailsForNewAccounts.length; ++i) {
         const email = emailsForNewAccounts[i];
         const userId = newUsers[i]?._id;

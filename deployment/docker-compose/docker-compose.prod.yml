@@ -2,7 +2,7 @@ services:
   pipeshub-ai:
     build:
       context: .
-      dockerfile: deployment/docker-compose/Dockerfile
+      dockerfile: Dockerfile
       args:
         VITE_SERVER_URL: https://wiki.studiobereikbaar.nl
         VITE_AUTH_URL: https://wiki.studiobereikbaar.nl
