@@ -96,6 +96,30 @@ const normalizeDisplayName = (name: string): string =>
     })
     .join(' ');
 
+const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  azureOpenAI: 'Azure OpenAI',
+  openAI: 'OpenAI',
+  anthropic: 'Anthropic',
+  gemini: 'Gemini',
+  claude: 'Claude',
+  ollama: 'Ollama',
+  bedrock: 'AWS Bedrock',
+  xai: 'xAI',
+  together: 'Together',
+  groq: 'Groq',
+  fireworks: 'Fireworks',
+  cohere: 'Cohere',
+  openAICompatible: 'OpenAI API Compatible',
+  mistral: 'Mistral',
+  voyage: 'Voyage',
+  jinaAI: 'Jina AI',
+  sentenceTransformers: 'Default',
+  default: 'Default',
+};
+
+export const formattedProvider = (provider: string): string =>
+  PROVIDER_DISPLAY_NAMES[provider] || normalizeDisplayName(provider);
+
 const ChatInput: React.FC<ChatInputProps> = ({
   onSubmit,
   isLoading,
@@ -457,7 +481,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
               <Box sx={{ display: 'flex', gap: 2, flexDirection: 'row', mr: 2 }}>
                 {/* Model Selector */}
                 <Tooltip
-                  title={`AI Model: ${selectedModel ? `${selectedModel.provider} - ${selectedModel.modelName}` : 'Select AI model'}`}
+                  title={`AI Model: ${selectedModel ? `${formattedProvider(selectedModel.provider)} - ${selectedModel.modelName}` : 'Select AI model'}`}
                 >
                   <Box
                     onClick={handleModelMenuOpen}
@@ -485,7 +509,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                       variant="body2"
                       sx={{ fontSize: '0.8rem', fontWeight: 500, minWidth: '60px' }}
                     >
-                      {normalizeDisplayName(selectedModel?.modelName || '')}
+                      {selectedModel?.modelName || ''}
                     </Typography>
                     <Icon icon={chevronDownIcon} width={12} height={12} />
                   </Box>
@@ -629,7 +653,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                     fontWeight="medium"
                     sx={{ fontSize: '0.9rem', mb: 0.5 }}
                   >
-                    {normalizeDisplayName(model.modelName)}
+                    {model.modelName}
                   </Typography>
                   <Typography
                     variant="caption"
@@ -644,7 +668,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                       overflow: 'hidden',
                     }}
                   >
-                    {normalizeDisplayName(model.provider)} {model.isMultimodal ? '• Multimodal' : ''}{' '}
+                    {formattedProvider(model.provider)} {model.isMultimodal ? '• Multimodal' : ''}{' '}
                     {model.isDefault ? '• Default' : ''}
                   </Typography>
                 </Box>

@@ -30,6 +30,7 @@ import axios from 'src/utils/axios';
 
 import { Iconify } from 'src/components/iconify';
 
+import { ConnectorId } from 'src/sections/accountdetails/types/connector';
 import { getConnectorPublicUrl } from '../../services/utils/services-configuration-service';
 
 interface AtlassianConfigFormProps {
@@ -123,7 +124,7 @@ const AtlassianConfigForm = forwardRef<AtlassianConfigFormRef, AtlassianConfigFo
         try {
           const response = await axios.get('/api/v1/connectors/config', {
             params: {
-              service: 'atlassian',
+              service: ConnectorId.ATLASSIAN,
             },
           });
 
@@ -237,7 +238,7 @@ const AtlassianConfigForm = forwardRef<AtlassianConfigFormRef, AtlassianConfigFo
         // Send the update request
         await axios.post('/api/v1/connectors/config', payload, {
           params: {
-            service: 'atlassian',
+            service: ConnectorId.ATLASSIAN,
           },
         });
 

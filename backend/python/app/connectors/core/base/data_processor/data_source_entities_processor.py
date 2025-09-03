@@ -96,8 +96,14 @@ class DataSourceEntitiesProcessor:
         producer_config = await self.config_service.get_config(
             config_node_constants.KAFKA.value
         )
+
+        # Ensure bootstrap_servers is a list
+        bootstrap_servers = producer_config.get("brokers") or producer_config.get("bootstrap_servers")
+        if isinstance(bootstrap_servers, str):
+            bootstrap_servers = [server.strip() for server in bootstrap_servers.split(",")]
+
         kafka_producer_config = KafkaProducerConfig(
-            bootstrap_servers=producer_config.get("bootstrap_servers"),
+            bootstrap_servers=bootstrap_servers,
             client_id=producer_config.get("client_id", "connectors"),
         )
         self.messaging_producer: IMessagingProducer = MessagingFactory.create_producer(
@@ -110,7 +116,6 @@ class DataSourceEntitiesProcessor:
         if not orgs:
             raise Exception("No organizations found in the database. Cannot initialize DataSourceEntitiesProcessor.")
         self.org_id = orgs[0]["_key"]
-
 
     async def _handle_parent_record(self, record: Record, transaction: TransactionDatabase) -> None:
         if record.parent_external_record_id:
@@ -368,12 +373,12 @@ class DataSourceEntitiesProcessor:
                     read=read_collections,
                     write=write_collections,
             )
-        for record_group, permissions in record_groups:
+        for record_group, _permissions in record_groups:
             record_group.org_id = self.org_id
 
             self.logger.info(f"Processing record group: {record_group}")
             existing_record_group = await self.arango_service.get_record_group_by_external_id(connector_name=record_group.connector_name,
-                                                                                            external_id=record_group.external_group_id, transaction=transaction)
+                                                                                              external_id=record_group.external_group_id, transaction=transaction)
             if existing_record_group is None:
                 record_group.id = str(uuid.uuid4())
                 # Create a permission edge between the record group and the org if it doesn't exist
@@ -400,43 +405,47 @@ class DataSourceEntitiesProcessor:
 
         # Get all users from the database(Active and Inactive)
         existing_users = await self.arango_service.get_users(self.org_id, active=False)
-
+        existing_user_emails = {existing_user.get("email") for existing_user in existing_users if existing_user is not None}
         for user in users:
             self.logger.info(f"Processing user: {user}")
 
-            existing_user_emails = {existing_user.get("email") for existing_user in existing_users}
             if user.email not in existing_user_emails:
                 user_record = user.to_arango_base_record()
                 user_record["isActive"] = False
                 user_record["_key"] = str(uuid.uuid4())
                 user_record["orgId"] = self.org_id
+                user_record["createdAtTimestamp"] = get_epoch_timestamp_in_ms()
+                user_record["updatedAtTimestamp"] = user_record["createdAtTimestamp"]
                 await self.arango_service.batch_upsert_nodes(
                     [user_record],
                     collection=CollectionNames.USERS.value, transaction=transaction
                 )
 
-                #  # Create a edge between the user and the org if it doesn't exist
-                #  user_org_relation = {
-                #     "_from": f"{CollectionNames.USERS.value}/{user.id}",
-                #     "_to": f"{CollectionNames.ORGS.value}/{self.org_id}",
-                #     "createdAtTimestamp": get_epoch_timestamp_in_ms(),
-                #     "updatedAtTimestamp": get_epoch_timestamp_in_ms(),
-                #     "entityType": "USER",
-                #  }
-                #  await self.arango_service.batch_create_edges(
-                #     [user_org_relation], collection=CollectionNames.BELONGS_TO.value, transaction=transaction
-                #  )
+                 # Create a edge between the user and the org if it doesn't exist
+                user_org_relation = {
+                    "_from": f"{CollectionNames.USERS.value}/{user_record['_key']}",
+                    "_to": f"{CollectionNames.ORGS.value}/{self.org_id}",
+                    "createdAtTimestamp": user_record["createdAtTimestamp"],
+                    "updatedAtTimestamp": user_record["updatedAtTimestamp"],
+                    "entityType": "ORGANIZATION",
+                }
+
+                await self.arango_service.batch_create_edges(
+                    [user_org_relation], collection=CollectionNames.BELONGS_TO.value, transaction=transaction
+                )
 
                 # Create a edge between the user and the app with sync status if it doesn't exist
                 # user_app_relation = {
-                #     "_from": f"{CollectionNames.USERS.value}/{user.id}",
+                #     "_from": f"{CollectionNames.USERS.value}/{user_record['_key']}",
                 #     "_to": f"{CollectionNames.APPS.value}/{self.app.id}",
                 #     "createdAtTimestamp": get_epoch_timestamp_in_ms(),
                 #     "updatedAtTimestamp": get_epoch_timestamp_in_ms(),
-                #     "entityType": "USER",
-                #  }
+                #     "syncState": "PENDING",
+                # }
 
-
+                # await self.arango_service.batch_create_edges(
+                #     [user_app_relation], collection=CollectionNames.BELONGS_TO.value, transaction=transaction
+                # )
 
         # Commit the transaction
         transaction.commit_transaction()
@@ -462,9 +471,9 @@ class DataSourceEntitiesProcessor:
     async def get_all_active_users(self) -> List[User]:
         users = await self.arango_service.get_users(self.org_id, active=True)
 
-        return [User.from_arango_user(user) for user in users]
+        return [User.from_arango_user(user) for user in users if user is not None]
 
     async def get_all_active_users_by_app(self, app: App) -> List[User]:
         users = await self.arango_service.get_users_by_app(self.org_id, app)
 
-        return [User.from_arango_user(user) for user in users]
+        return [User.from_arango_user(user) for user in users if user is not None]
