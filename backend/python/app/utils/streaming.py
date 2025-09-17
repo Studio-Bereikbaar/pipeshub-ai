@@ -2,8 +2,30 @@ import json
 import re
 from typing import Any, AsyncGenerator, Dict, Union
 
+import aiohttp
+from fastapi import HTTPException
+
+from app.config.constants.http_status_code import HttpStatusCode
 from app.modules.qna.prompt_templates import AnswerWithMetadata
 from app.utils.citations import normalize_citations_and_chunks
+
+
+async def stream_content(signed_url: str) -> AsyncGenerator[bytes, None]:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(signed_url) as response:
+                if response.status != HttpStatusCode.SUCCESS.value:
+                    raise HTTPException(
+                        status_code=HttpStatusCode.INTERNAL_SERVER_ERROR.value,
+                        detail=f"Failed to fetch file content: {response.status}"
+                    )
+                async for chunk in response.content.iter_chunked(8192):
+                    yield chunk
+    except aiohttp.ClientError as e:
+        raise HTTPException(
+            status_code=HttpStatusCode.INTERNAL_SERVER_ERROR.value,
+            detail=f"Failed to fetch file content from signed URL {str(e)}"
+        )
 
 
 def find_unescaped_quote(text: str) -> int:
@@ -49,6 +71,7 @@ async def stream_llm_response(
     llm,
     messages,
     final_results,
+    citation_to_index,
     target_words_per_chunk: int = 5,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
@@ -108,7 +131,7 @@ async def stream_llm_response(
                             continue
 
                         normalized, cites = normalize_citations_and_chunks(
-                            current_raw, final_results
+                            current_raw, final_results,citation_to_index
                         )
 
                         chunk_text = normalized[prev_norm_len:]
@@ -126,7 +149,7 @@ async def stream_llm_response(
         try:
             parsed = json.loads(escape_ctl(full_json_buf))
             final_answer = parsed.get("answer", answer_buf)
-            normalized, c = normalize_citations_and_chunks(final_answer, final_results)
+            normalized, c = normalize_citations_and_chunks(final_answer, final_results,citation_to_index)
             yield {
                 "event": "complete",
                 "data": {
@@ -137,7 +160,7 @@ async def stream_llm_response(
                 },
             }
         except Exception:
-            normalized, c = normalize_citations_and_chunks(answer_buf, final_results)
+            normalized, c = normalize_citations_and_chunks(answer_buf, final_results,citation_to_index)
             yield {
                 "event": "complete",
                 "data": {

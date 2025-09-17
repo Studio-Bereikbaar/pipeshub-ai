@@ -63,13 +63,12 @@ belongs_to_schema = {
             "_from": {"type": "string", "minLength": 1},
             "_to": {"type": "string", "minLength": 1},
             "entityType": {
-                "type": "string",
+                "type": ["string", "null"],
                 "enum": ["GROUP", "DOMAIN", "ORGANIZATION", "KB", "WORKFLOW", "USER"],
             },
             "createdAtTimestamp": {"type": "number"},
             "updatedAtTimestamp": {"type": "number"},
         },
-        "required": ["entityType"],
         "additionalProperties": True,
     },
     "level": "strict",
@@ -83,7 +82,7 @@ permissions_schema = {
             "_from": {"type": "string", "minLength": 1},
             "_to": {"type": "string", "minLength": 1},
             "externalPermissionId": {"type": ["string", "null"]},
-            "type": {"type": "string", "enum": ["USER", "GROUP", "DOMAIN"]},
+            "type": {"type": "string", "enum": ["USER", "GROUP", "DOMAIN","TEAM"]},
             "role": {
                 "type": "string",
                 "enum": [

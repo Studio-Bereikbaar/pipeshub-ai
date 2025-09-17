@@ -10,7 +10,6 @@ from app.services.graph_db.graph_db_factory import GraphDBFactory
 from app.config.providers.etcd.etcd3_encrypted_store import Etcd3EncryptedKeyValueStore
 from app.config.configuration_service import ConfigurationService
 from app.sources.external.google.admin.admin import GoogleAdminDataSource
-from app.sources.external.google.drive.drive import GoogleDriveDataSource
 
 
 async def main() -> None:
@@ -27,6 +26,7 @@ async def main() -> None:
 
     enterprise_google_client = await GoogleClient.build_from_services(
         service_name="admin",
+        version="directory_v1",
         logger=logging.getLogger(__name__),
         config_service=config_service,
         graph_db_service=graph_db_service,
@@ -37,23 +37,8 @@ async def main() -> None:
 
     print(results)
     
-    users_get = await google_admin_client.users_get(userKey="xxx")
+    users_get = await google_admin_client.users_get(userKey="<placeholder>")
     print(users_get)
-
-
-    individual_google_client = await GoogleClient.build_from_services(
-        service_name="drive",
-        logger=logging.getLogger(__name__),
-        config_service=config_service,
-        graph_db_service=graph_db_service,
-        is_individual=True,
-    )
-
-    google_drive_client = GoogleDriveDataSource(individual_google_client.get_client())
-
-    results = await google_drive_client.about_get()
-    print(results)
-
 
 
 if __name__ == "__main__":

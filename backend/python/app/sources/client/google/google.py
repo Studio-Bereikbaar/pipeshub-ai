@@ -29,6 +29,7 @@ from app.services.graph_db.interface.graph_db import IGraphService
 from app.sources.client.http.http_client import HTTPClient
 from app.sources.client.http.http_request import HTTPRequest
 from app.sources.client.iclient import IClient
+from app.sources.client.utils.utils import merge_scopes
 
 try:
     from google.oauth2 import service_account  # type: ignore
@@ -114,7 +115,7 @@ class GoogleClient(IClient):
         Returns:
             GoogleClient instance
         """
-        # TODO Cleanup this code
+        # TODO Cleanup this code for orgId and userId fetch
         # get org id
         query = f"""
             FOR org IN {CollectionNames.ORGS.value}
@@ -125,9 +126,8 @@ class GoogleClient(IClient):
         bind_vars = {"active": True}
         orgs = await graph_db_service.execute_query(query, bind_vars=bind_vars)
         if not orgs:
-            raise Exception("Org ID not found")
+            raise ValueError("Org ID not found")
         org_id = orgs[0]["_key"]
-
         if is_individual:
             try:
                 # get user id
@@ -142,20 +142,21 @@ class GoogleClient(IClient):
 
                 users = await graph_db_service.execute_query(query, bind_vars={"org_id": org_id, "active": True})
                 if not users:
-                    raise Exception("User ID not found")
-                user_id = users[0]["_key"]
+                    raise ValueError("User not found for the given organization.")
+                user_id = users[0]["userId"]
                 if not user_id:
-                    raise Exception("User ID not found")
+                    raise ValueError("User ID is missing in the user document.")
                 #fetch saved credentials
                 saved_credentials = await GoogleClient.get_individual_token(org_id, user_id, config_service)
-
+                if not saved_credentials:
+                    raise ValueError("Failed to get individual token")
                 google_credentials = Credentials(
                     token=saved_credentials.get(CredentialKeys.ACCESS_TOKEN.value),
                     refresh_token=saved_credentials.get(CredentialKeys.REFRESH_TOKEN.value),
                     token_uri="https://oauth2.googleapis.com/token",
                     client_id=saved_credentials.get(CredentialKeys.CLIENT_ID.value),
                     client_secret=saved_credentials.get(CredentialKeys.CLIENT_SECRET.value),
-                    scopes=scopes or GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES,
+                    scopes=merge_scopes(GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES, scopes),
                 )
 
                 # Create Google Drive service using the credentials
@@ -164,7 +165,12 @@ class GoogleClient(IClient):
                 raise GoogleAuthError("Failed to get individual token: " + str(e)) from e
         else:
             try:
-                saved_credentials = await GoogleClient.get_enterprise_token(org_id, config_service)
+                # Use the specific connector name from service_name to fetch the right credentials
+                # Map common service_name to connector key
+                connector_name = "DRIVE" if service_name.lower() == "drive" else (
+                    "GMAIL" if service_name.lower() == "gmail" else service_name.upper()
+                )
+                saved_credentials = await GoogleClient.get_enterprise_token(org_id, config_service, app_name=connector_name)
                 if not saved_credentials:
                     raise AdminAuthError(
                         "Failed to get enterprise credentials",
@@ -184,7 +190,7 @@ class GoogleClient(IClient):
                 google_credentials = (
                         service_account.Credentials.from_service_account_info(
                             saved_credentials,
-                            scopes=scopes or GOOGLE_CONNECTOR_ENTERPRISE_SCOPES + GOOGLE_PARSER_SCOPES,
+                            scopes=merge_scopes(GOOGLE_CONNECTOR_ENTERPRISE_SCOPES + GOOGLE_PARSER_SCOPES, scopes),
                             subject=admin_email
                         )
                     )
@@ -200,8 +206,8 @@ class GoogleClient(IClient):
 
             try:
                 client = build(
-                    "admin",
-                    "directory_v1",
+                    service_name,
+                    version,
                     credentials=google_credentials,
                     cache_discovery=False,
                 )
@@ -243,7 +249,6 @@ class GoogleClient(IClient):
 
         # 3) Create JWT
         jwt_token = jwt.encode(payload, scoped_jwt_secret, algorithm="HS256")
-
         # 4) Resolve endpoint
         endpoints = await config_service.get_config(config_node_constants.ENDPOINTS.value)
         if not endpoints:
@@ -257,7 +262,6 @@ class GoogleClient(IClient):
 
         # 5) Call API
         url = f"{nodejs_endpoint}{route.value}"
-
         http_client = HTTPClient(token=jwt_token)
         request = HTTPRequest(url=url, method="GET", body=payload)  # Note: GET with body is unusual
         response = await http_client.execute(request)
@@ -282,11 +286,8 @@ class GoogleClient(IClient):
     async def get_enterprise_token(
         org_id: str,
         config_service: ConfigurationService,
+        app_name: str = "DRIVE",
     ) -> dict[str, Any]:
-        """Handle enterprise token."""
-        return await GoogleClient._fetch_credentials(
-            org_id=org_id,
-            config_service=config_service,
-            route=Routes.BUSINESS_CREDENTIALS,
-            scopes=[TokenScopes.FETCH_CONFIG.value],
-        )
+        """Handle enterprise token for a specific connector."""
+        config = await config_service.get_config(f"/services/connectors/{app_name.lower()}/config")
+        return config.get("auth", {})

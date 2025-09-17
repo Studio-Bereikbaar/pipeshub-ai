@@ -8,15 +8,16 @@ import { useAdmin } from 'src/context/AdminContext';
 import { DashboardLayout } from 'src/layouts/dashboard';
 
 import { LoadingScreen } from 'src/components/loading-screen';
+import { ConnectorProvider } from 'src/sections/accountdetails/connectors/context';
 
 import { AuthGuard } from 'src/auth/guard';
 import { useAuthContext } from 'src/auth/hooks';
-
 // ----------------------------------------------------------------------
 
 // Overview
 const ChatBotPage = lazy(() => import('src/pages/dashboard/qna/chatbot'));
 const AgentPage = lazy(() => import('src/pages/dashboard/qna/agent'));
+const AgentBuilderPage = lazy(() => import('src/pages/dashboard/qna/agent-builder'));
 const AgentChatPage = lazy(() => import('src/sections/qna/agents/agent-chat'));
 // Accountdetails
 const CompanyProfile = lazy(() => import('src/pages/dashboard/account/company-profile'));
@@ -33,19 +34,10 @@ const ConnectorSettings = lazy(
   () => import('src/pages/dashboard/account/connectors/connector-settings')
 );
 
-const GoogleWorkspaceBusinessPage = lazy(
-  () => import('src/pages/dashboard/account/connectors/googleWorkspace-business')
+// Generic connector management (parameterized by name)
+const ConnectorManagementPage = lazy(
+  () => import('src/pages/dashboard/account/connectors/[connectorName]')
 );
-
-const GoogleWorkspaceIndividualPage = lazy(
-  () => import('src/pages/dashboard/account/connectors/googleWorkspace-individual')
-);
-const GoogleWorkspaceOAuthCallback = lazy(
-  () => import('src/pages/dashboard/account/connectors/googleWorkspace-oauth-callback')
-);
-const AtlassianPage = lazy(() => import('src/pages/dashboard/account/connectors/atlassian'));
-const OneDrivePage = lazy(() => import('src/pages/dashboard/account/connectors/onedrive'));
-const SharepointPage = lazy(() => import('src/pages/dashboard/account/connectors/sharepoint'));
 
 const SamlSsoConfigPage = lazy(() => import('src/pages/dashboard/account/saml-sso-config'));
 
@@ -174,11 +166,13 @@ const ProtectedRoute = ({ component: Component }: { component: React.ComponentTy
 
 // Layout with outlet for nested routes
 const layoutContent = (
+  <ConnectorProvider>
   <DashboardLayout>
     <Suspense fallback={<LoadingScreen />}>
       <Outlet />
     </Suspense>
   </DashboardLayout>
+  </ConnectorProvider>
 );
 
 export const dashboardRoutes = [
@@ -189,9 +183,13 @@ export const dashboardRoutes = [
       { element: <ChatBotPage key="home" />, index: true },
       { path: ':conversationId', element: <ChatBotPage key="conversation" /> },
       { path: 'agents', element: <AgentPage key="agent" /> },
+      { path: 'agents/new', element: <AgentBuilderPage key="agent-builder" /> },
       { path: 'agents/:agentKey', element: <AgentChatPage key="agent-chat" /> },
+      { path: 'agents/:agentKey/edit', element: <AgentBuilderPage key="agent-edit" /> },
+      { path: 'agents/:agentKey/flow', element: <AgentBuilderPage key="flow-agent-edit" /> },
       { path: 'agents/:agentKey/conversations/:conversationId', element: <AgentChatPage key="agent-conversation" /> },
       { path: 'record/:recordId', element: <RecordDetails /> },
+      { path: 'connectors', element: <Navigate to="/account/individual/settings/connector" replace /> },
       {
         path: 'account',
         children: [
@@ -323,25 +321,13 @@ export const dashboardRoutes = [
                         index: true,
                       },
                       {
-                        path: 'googleWorkspace',
+                        path: ':connectorName',
                         element: CONFIG.auth.skip ? (
-                          <GoogleWorkspaceBusinessPage />
+                          <ConnectorManagementPage />
                         ) : (
-                          <BusinessAdminOnlyRoute component={GoogleWorkspaceBusinessPage} />
+                          <BusinessAdminOnlyRoute component={ConnectorManagementPage} />
                         ),
-                      },
-                      {
-                        path: 'atlassian',
-                        element: <BusinessAdminOnlyRoute component={AtlassianPage} />,
-                      },
-                      {
-                        path: 'onedrive',
-                        element: <BusinessAdminOnlyRoute component={OneDrivePage} />,
-                      },
-                      {
-                        path: 'sharepoint',
-                        element: <BusinessAdminOnlyRoute component={SharepointPage} />,
-                      },
+                      }
                     ],
                   },
                   {
@@ -436,30 +422,11 @@ export const dashboardRoutes = [
                         ),
                         index: true,
                       },
+                      // Parameterized connector management page
                       {
-                        path: 'googleWorkspace',
-                        element: CONFIG.auth.skip ? (
-                          <GoogleWorkspaceIndividualPage />
-                        ) : (
-                          <IndividualOnlyRoute component={GoogleWorkspaceIndividualPage} />
-                        ),
-                      },
-                      {
-                        path: 'googleWorkspace/oauth/callback',
-                        element: <GoogleWorkspaceOAuthCallback />,
-                      },
-                      {
-                        path: 'atlassian',
-                        element: <IndividualOnlyRoute component={AtlassianPage} />,
-                      },
-                      {
-                        path: 'onedrive',
-                        element: <IndividualOnlyRoute component={OneDrivePage} />,
-                      },
-                      {
-                        path: 'sharepoint',
-                        element: <IndividualOnlyRoute component={SharepointPage} />,
-                      },
+                        path: ':connectorName',
+                        element: <IndividualOnlyRoute component={ConnectorManagementPage} />,
+                      }
                     ],
                   },
                   {

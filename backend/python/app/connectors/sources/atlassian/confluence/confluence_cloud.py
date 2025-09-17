@@ -13,19 +13,26 @@ from app.config.constants.arangodb import (
     OriginTypes,
     RecordTypes,
 )
+from app.connectors.core.base.connector.connector_service import BaseConnector
 from app.connectors.core.base.data_processor.data_source_entities_processor import (
     DataSourceEntitiesProcessor,
 )
+from app.connectors.core.base.data_store.data_store import DataStoreProvider
 from app.connectors.core.base.token_service.oauth_service import OAuthToken
+from app.connectors.sources.atlassian.core.apps import ConfluenceApp
 from app.connectors.sources.atlassian.core.oauth import (
     OAUTH_CONFIG_PATH,
     OAUTH_CREDENTIALS_PATH,
     AtlassianOAuthProvider,
     AtlassianScope,
 )
-from app.models.entities import RecordGroupType, RecordType, WebpageRecord
+from app.models.entities import (
+    AppUser,
+    RecordGroupType,
+    RecordType,
+    WebpageRecord,
+)
 from app.models.permission import EntityType, Permission, PermissionType
-from app.models.users import User
 
 RESOURCE_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
 BASE_URL = "https://api.atlassian.com/ex/confluence"
@@ -224,7 +231,7 @@ class ConfluenceClient:
     async def fetch_pages_with_permissions(
         self,
         space_id: str,
-        users: List[User],
+        users: List[AppUser],
     ) -> List[WebpageRecord]:
         base_url = f"{BASE_URL}/{self.cloud_id}"
         limit = 25
@@ -263,8 +270,8 @@ class ConfluenceClient:
                     record_name=page["title"],
                     record_type=RecordTypes.WEBPAGE,
                     origin=OriginTypes.CONNECTOR,
-                    connector_name=Connectors.CONFLUENCE.value,
-                    record_group_type=RecordGroupType.CONFLUENCE_SPACES.value,
+                    connector_name=Connectors.CONFLUENCE,
+                    record_group_type=RecordGroupType.CONFLUENCE_SPACES,
                     external_record_group_id=space_id,
                     parent_record_type=RecordType.WEBPAGE,
                     parent_external_record_id=page.get('parentId'),
@@ -282,7 +289,7 @@ class ConfluenceClient:
 
         return records
 
-    async def fetch_users(self) -> List[User]:
+    async def fetch_users(self) -> List[AppUser]:
         url = f"{BASE_URL}/{self.cloud_id}/rest/api/3/users/search"
         users = []
         base_url = f"{BASE_URL}/{self.cloud_id}"
@@ -293,33 +300,33 @@ class ConfluenceClient:
             if not next_url:
                 break
             url = f"{base_url}/{next_url}"
-        return [User(email=user["emailAddress"], org_id=self.org_id) for user in users]
+        return [AppUser(self.connector_name, email=user["emailAddress"], org_id=self.org_id) for user in users]
 
 
 
-class ConfluenceConnector:
-    def __init__(self, logger: Logger, data_entities_processor: DataSourceEntitiesProcessor, config_service: ConfigurationService) -> None:
-        self.logger = logger
-        self.data_entities_processor = data_entities_processor
-        self.config_service = config_service
+class ConfluenceConnector(BaseConnector):
+    def __init__(self, logger: Logger, data_entities_processor: DataSourceEntitiesProcessor,
+                 data_store_provider: DataStoreProvider, config_service: ConfigurationService) -> None:
+        super().__init__(ConfluenceApp(), logger, data_entities_processor, data_store_provider, config_service)
         self.provider = None
 
-    async def initialize(self) -> None:
+    async def init(self) -> None:
         await self.data_entities_processor.initialize()
-        config = await self.config_service.get_config(f"{OAUTH_CONFIG_PATH}/{self.data_entities_processor.org_id}")
+
+        self.config = await self.config_service.get_config(f"{OAUTH_CONFIG_PATH}/{self.data_entities_processor.org_id}")
+        credentials_config = self.config
         self.provider = AtlassianOAuthProvider(
-            client_id=config["client_id"],
-            client_secret=config["client_secret"],
-            redirect_uri=config["redirect_uri"],
+            client_id=credentials_config["client_id"],
+            client_secret=credentials_config["client_secret"],
+            redirect_uri=credentials_config["redirect_uri"],
             scopes=AtlassianScope.get_full_access(),
             key_value_store=self.config_service.store,
-            base_arango_service=self.data_entities_processor.arango_service,
             credentials_path=f"{OAUTH_CREDENTIALS_PATH}/{self.data_entities_processor.org_id}"
         )
+        return True
 
-    async def run(self) -> None:
+    async def run_sync(self) -> None:
         users = await self.data_entities_processor.get_all_active_users()
-        # users = await self.data_entities_processor.get_all_active_users_by_app(ConfluenceApp())
         if not users:
             self.logger.info("No users found")
             return

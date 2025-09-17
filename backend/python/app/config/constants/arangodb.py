@@ -34,10 +34,10 @@ class Connectors(Enum):
     GOOGLE_CALENDAR = "CALENDAR"
 
     ONEDRIVE = "ONEDRIVE"
-    SHAREPOINT_ONLINE = "SHAREPOINT_ONLINE"
+    SHAREPOINT_ONLINE = "SHAREPOINT ONLINE"
     OUTLOOK = "OUTLOOK"
-    OUTLOOK_CALENDAR = "OUTLOOK_CALENDAR"
-    MICROSOFT_TEAMS = "MICROSOFT_TEAMS"
+    OUTLOOK_CALENDAR = "OUTLOOK CALENDAR"
+    MICROSOFT_TEAMS = "MICROSOFT TEAMS"
 
     NOTION = "NOTION"
     SLACK = "SLACK"
@@ -57,6 +57,18 @@ class OriginTypes(Enum):
     CONNECTOR = "CONNECTOR"
     UPLOAD = "UPLOAD"
 
+class LegacyCollectionNames(Enum):
+    KNOWLEDGE_BASE = "knowledgeBase"
+    PERMISSIONS_TO_KNOWLEDGE_BASE = "permissionsToKnowledgeBase"
+    BELONGS_TO_KNOWLEDGE_BASE = "belongsToKnowledgeBase"
+    BELONGS_TO_KB = "belongsToKB"
+
+class LegacyGraphNames(Enum):
+    FILE_ACCESS_GRAPH = "fileAccessGraph"
+
+class GraphNames(Enum):
+    KNOWLEDGE_GRAPH = "knowledgeGraph"
+
 class CollectionNames(Enum):
     # Records and Record relations
     RECORDS = "records"
@@ -65,11 +77,8 @@ class CollectionNames(Enum):
     SYNC_POINTS = "syncPoints"
 
     # Knowledge base
-    KNOWLEDGE_BASE = "knowledgeBase"
     IS_OF_TYPE = "isOfType"
-    BELONGS_TO_KNOWLEDGE_BASE = "belongsToKnowledgeBase"
-    PERMISSIONS_TO_KNOWLEDGE_BASE = "permissionsToKnowledgeBase"
-    BELONGS_TO_KB = "belongsToKB"
+    PERMISSION = "permission"
     PERMISSIONS_TO_KB = "permissionsToKB"
 
     # Drive related
@@ -78,10 +87,9 @@ class CollectionNames(Enum):
 
     # Record types
     FILES = "files"
-    ATTACHMENTS = "attachments"
     LINKS = "links"
     MAILS = "mails"
-    MESSAGES = "messages"
+    #MESSAGES = "messages"
     WEBPAGES = "webpages"
     TICKETS = "tickets"
 
@@ -89,12 +97,12 @@ class CollectionNames(Enum):
     PEOPLE = "people"
     USERS = "users"
     GROUPS = "groups"
-    USER_GROUPS = "userGroups"
     ORGS = "organizations"
-    DOMAINS = "domains"
+    # DOMAINS = "domains"
     ANYONE = "anyone"
-    ANYONE_WITH_LINK = "anyoneWithLink"
+    # ANYONE_WITH_LINK = "anyoneWithLink"
     BELONGS_TO = "belongsTo"
+    TEAMS = "teams"
 
     # Departments
     DEPARTMENTS = "departments"
@@ -117,10 +125,6 @@ class CollectionNames(Enum):
     CHANNEL_HISTORY = "channelHistory"
     PAGE_TOKENS = "pageTokens"
 
-    # Graphs
-    FILE_ACCESS_GRAPH = "fileAccessGraph"
-    KNOWLEDGE_GRAPH = "knowledgeGraph"
-
     APPS = "apps"
     ORG_APP_RELATION = "orgAppRelation"
     USER_APP_RELATION = "userAppRelation"
@@ -128,16 +132,21 @@ class CollectionNames(Enum):
 
     BLOCKS = "blocks"
 
-    WEBPAGE_RECORD="webpageRecord"
-    WEBPAGE_COMMENT_RECORD="webpageCommentRecord"
+    # WEBPAGE_RECORD="webpageRecord"
+    # WEBPAGE_COMMENT_RECORD="webpageCommentRecord"
 
-    NOTION_DATABASE_RECORD="notionDatabaseRecord"
+    # NOTION_DATABASE_RECORD="notionDatabaseRecord"
     BELONGS_TO_RECORD_GROUP="belongsToRecordGroup"
 
+    # Storage mappings
+    VIRTUAL_RECORD_TO_DOC_ID_MAPPING = "virtualRecordToDocIdMapping"
     # Agent Builder collections
     AGENT_TEMPLATES = "agentTemplates"
     AGENT_INSTANCES = "agentInstances"
-    TEMPLATE_ACCESS = "templateAccess"
+
+class QdrantCollectionNames(Enum):
+    RECORDS = "records"
+
 
 class ExtensionTypes(Enum):
     PDF = "pdf"
@@ -160,6 +169,7 @@ class MimeTypes(Enum):
     GOOGLE_DOCS = "application/vnd.google-apps.document"
     GOOGLE_SHEETS = "application/vnd.google-apps.spreadsheet"
     GOOGLE_DRIVE_FOLDER = "application/vnd.google-apps.folder"
+    FOLDER = "text/directory"
     DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     DOC = "application/msword"
     PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -195,6 +205,8 @@ class RecordTypes(Enum):
     WEBPAGE_COMMENT = "WEBPAGE_COMMENT"
     NOTION_DATABASE = "NOTION_DATABASE"
     NOTION_PAGE = "NOTION_PAGE"
+    SHAREPOINT_LIST = "SHAREPOINT_LIST"
+    SHAREPOINT_PAGE = "SHAREPOINT_PAGE"
 
 class RecordRelations(Enum):
     PARENT_CHILD = "PARENT_CHILD"

@@ -2,12 +2,3 @@ export const ORIGIN = {
   UPLOAD: 'UPLOAD',
   CONNECTOR: 'CONNECTOR',
 };
-
-export const CONNECTOR_NAME = {
-  ONEDRIVE: 'ONEDRIVE',
-  DRIVE: 'DRIVE',
-  CONFLUENCE: 'CONFLUENCE',
-  JIRA: 'JIRA',
-  GMAIL: 'GMAIL',
-  SLACK: 'SLACK',
-};
