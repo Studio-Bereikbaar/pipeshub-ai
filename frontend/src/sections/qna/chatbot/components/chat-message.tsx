@@ -5,7 +5,6 @@ import remarkGfm from 'remark-gfm';
 import { Icon } from '@iconify/react';
 import ReactMarkdown from 'react-markdown';
 import refreshIcon from '@iconify-icons/mdi/refresh';
-import loadingIcon from '@iconify-icons/mdi/loading';
 import accountIcon from '@iconify-icons/mdi/account-outline';
 import React, {
   useRef,
@@ -19,7 +18,6 @@ import React, {
 
 import {
   Box,
-  Fade,
   Paper,
   Stack,
   Dialog,
@@ -29,7 +27,6 @@ import {
   IconButton,
   DialogTitle,
   DialogContent,
-  CircularProgress,
   ClickAwayListener,
   alpha,
   useTheme,
@@ -211,7 +208,7 @@ const StreamingContent = React.memo(
         const citationNumber = parseInt(citationRef.replace(/[[\]]/g, ''), 10);
         const citation = citationMap[citationNumber];
 
-        if (!citation?.metadata?.extension || citation?.metadata?.mimeType === 'text/html') {
+        if (!citation?.metadata?.extension) {
           window.open(citation?.metadata?.webUrl, '_blank');
           return;
         }
@@ -346,7 +343,67 @@ const StreamingContent = React.memo(
           />
         )}
 
-        <ReactMarkdown
+        {/* Placeholder when waiting for streaming to start */}
+        {/* {showPlaceholder && (
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1.5,
+              py: 1,
+              px: 2,
+              borderRadius: 2,
+              bgcolor: (theme) =>
+                theme.palette.mode === 'dark'
+                  ? 'rgba(255, 255, 255, 0.03)'
+                  : 'rgba(0, 0, 0, 0.02)',
+              border: (theme) =>
+                `1px solid ${
+                  theme.palette.mode === 'dark'
+                    ? 'rgba(255, 255, 255, 0.08)'
+                    : 'rgba(0, 0, 0, 0.08)'
+                }`,
+            }}
+          >
+            <Box
+              sx={{
+                display: 'flex',
+                gap: 0.5,
+                alignItems: 'center',
+              }}
+            >
+              {[0, 1, 2].map((i) => (
+                <Box
+                  key={i}
+                  sx={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    bgcolor: 'text.secondary',
+                    animation: `bounce 1.4s ease-in-out ${i * 0.16}s infinite`,
+                    '@keyframes bounce': {
+                      '0%, 80%, 100%': { transform: 'scale(0.8)', opacity: 0.5 },
+                      '40%': { transform: 'scale(1)', opacity: 1 },
+                    },
+                  }}
+                />
+              ))}
+            </Box>
+            <Typography
+              variant="body2"
+              sx={{
+                fontSize: '0.875rem',
+                color: 'text.secondary',
+                fontStyle: 'italic',
+              }}
+            >
+              Regenerating response...
+            </Typography>
+          </Box>
+        )} */}
+
+       
+          <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           components={{
             p: ({ children }) => {
@@ -521,8 +578,85 @@ const StreamingContent = React.memo(
               </Box>
             ),
             hr: () => <Divider sx={{ my: 3 }} />,
+            table: ({ children }) => (
+              <Box
+                sx={{
+                  my: 2,
+                }}
+              >
+                <Box
+                  component="table"
+                  sx={{
+                    width: '100%',
+                    borderCollapse: 'collapse',
+                    '& th, & td': {
+                      border: (theme) =>
+                        `1px solid ${
+                          theme.palette.mode === 'dark'
+                            ? 'rgba(255, 255, 255, 0.12)'
+                            : 'rgba(0, 0, 0, 0.12)'
+                        }`,
+                      padding: '8px 12px',
+                      textAlign: 'left',
+                    },
+                    '& th': {
+                      fontWeight: 600,
+                      bgcolor: (theme) =>
+                        theme.palette.mode === 'dark'
+                          ? 'rgba(255, 255, 255, 0.05)'
+                          : 'rgba(0, 0, 0, 0.03)',
+                    },
+                  }}
+                >
+                  {children}
+                </Box>
+              </Box>
+            ),
+            thead: ({ children }) => (
+              <Box component="thead" sx={{ display: 'table-header-group' }}>
+                {children}
+              </Box>
+            ),
+            tbody: ({ children }) => (
+              <Box component="tbody" sx={{ display: 'table-row-group' }}>
+                {children}
+              </Box>
+            ),
+            tr: ({ children }) => (
+              <Box component="tr" sx={{ display: 'table-row' }}>
+                {children}
+              </Box>
+            ),
+            th: ({ children }) => {
+              const processedChildren = processChildrenForCitations(children);
+              return (
+                <Box
+                  component="th"
+                  sx={{
+                    display: 'table-cell',
+                    fontWeight: 600,
+                    fontSize: '0.875rem',
+                  }}
+                >
+                  {processedChildren}
+                </Box>
+              );
+            },
+            td: ({ children }) => {
+              const processedChildren = processChildrenForCitations(children);
+              return (
+                <Box
+                  component="td"
+                  sx={{
+                    display: 'table-cell',
+                    fontSize: '0.875rem',
+                  }}
+                >
+                  {processedChildren}
+                </Box>
+              );
+            },
           }}
-          className="markdown-body"
         >
           {processedContent}
         </ReactMarkdown>
@@ -611,15 +745,25 @@ const ChatMessage = React.memo(
     onRegenerate,
     onFeedbackSubmit,
     conversationId,
-    isRegenerating,
     showRegenerate,
     onViewPdf,
   }: ChatMessageProps) => {
     const theme = useTheme();
+    const { streamingState } = useStreamingContent();
     const [selectedRecord, setSelectedRecord] = useState<Record | null>(null);
     const [isRecordDialogOpen, setRecordDialogOpen] = useState<boolean>(false);
 
     const isStreamingMessage = message.id.startsWith('streaming-');
+    
+    // Check if this is a streaming message with no content yet
+    // Hide the message box until content starts arriving
+    const isStreamingThisMessage = streamingState.messageId === message.id && streamingState.isActive;
+    const hasContent = 
+      (message.content && message.content.trim().length > 0) ||
+      (isStreamingThisMessage && streamingState.content && streamingState.content.trim().length > 0);
+    
+    // Hide the message box if it's a streaming message with no content
+    const shouldHideMessage = isStreamingMessage && !hasContent;
 
     const aggregatedCitations = useMemo(() => {
       if (!message.citations) return {};
@@ -667,16 +811,16 @@ const ChatMessage = React.memo(
 
     return (
       <Box sx={{ mb: 3, width: '100%', position: 'relative' }}>
-        <Box
-          sx={{
-            mb: 1,
-            display: 'flex',
-            justifyContent: message.type === 'user' ? 'flex-end' : 'flex-start',
-            px: 1,
-            opacity: isRegenerating ? 0.6 : 1,
-            transition: 'opacity 0.3s ease',
-          }}
-        >
+        {/* Hide header when message box is hidden */}
+        {!shouldHideMessage && (
+          <Box
+            sx={{
+              mb: 1,
+              display: 'flex',
+              justifyContent: message.type === 'user' ? 'flex-end' : 'flex-start',
+              px: 1,
+            }}
+          >
           <Stack
             direction="row"
             spacing={1.5}
@@ -787,11 +931,14 @@ const ChatMessage = React.memo(
                 </Box>
               )}
           </Stack>
-        </Box>
+          </Box>
+        )}
 
-        <Box sx={{ position: 'relative' }}>
-          <Paper
-            elevation={0}
+        {/* Hide the message box if it's a streaming message with no content yet */}
+        {!shouldHideMessage && (
+          <Box sx={{ position: 'relative' }}>
+            <Paper
+              elevation={0}
             sx={{
               width: '100%',
               maxWidth: message.type === 'user' ? '70%' : '90%',
@@ -822,8 +969,6 @@ const ChatMessage = React.memo(
               },
               position: 'relative',
               transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-              opacity: isRegenerating ? 0.5 : 1,
-              filter: isRegenerating ? 'blur(0.5px)' : 'none',
               fontFamily:
                 '"Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
               boxShadow: (themeVal) =>
@@ -882,6 +1027,7 @@ const ChatMessage = React.memo(
               aggregatedCitations={aggregatedCitations}
               onRecordClick={handleOpenRecordDetails}
               onViewPdf={handleViewPdf}
+              modelInfo={(message as any).modelInfo || null}
             />
 
             {message.type === 'bot' && !isStreamingMessage && (
@@ -901,7 +1047,6 @@ const ChatMessage = React.memo(
                       <IconButton
                         onClick={() => onRegenerate(message.id)}
                         size="small"
-                        disabled={isRegenerating}
                         sx={{
                           borderRadius: 1.5,
                           p: 1,
@@ -924,10 +1069,9 @@ const ChatMessage = React.memo(
                         }}
                       >
                         <Icon
-                          icon={isRegenerating ? loadingIcon : refreshIcon}
+                          icon={refreshIcon}
                           width={16}
                           height={16}
-                          className={isRegenerating ? 'spin' : ''}
                         />
                       </IconButton>
                       <MessageFeedback
@@ -941,7 +1085,8 @@ const ChatMessage = React.memo(
               </>
             )}
           </Paper>
-        </Box>
+          </Box>
+        )}
 
         <Dialog
           open={isRecordDialogOpen}
@@ -973,34 +1118,6 @@ const ChatMessage = React.memo(
           </DialogContent>
         </Dialog>
 
-        {isRegenerating && (
-          <Fade in>
-            <Box
-              sx={{
-                position: 'absolute',
-                top: '50%',
-                left: '50%',
-                transform: 'translate(-50%, -50%)',
-                zIndex: 1,
-                p: 2,
-                borderRadius: 2,
-                backgroundColor: (themeVal) =>
-                  themeVal.palette.mode === 'dark'
-                    ? 'rgba(0, 0, 0, 0.8)'
-                    : 'rgba(255, 255, 255, 0.9)',
-                backdropFilter: 'blur(8px)',
-              }}
-            >
-              <CircularProgress
-                size={24}
-                thickness={4}
-                sx={{
-                  color: (themeVal) => themeVal.palette.primary.main,
-                }}
-              />
-            </Box>
-          </Fade>
-        )}
       </Box>
     );
   },
@@ -1009,7 +1126,6 @@ const ChatMessage = React.memo(
     prevProps.message.content === nextProps.message.content &&
     prevProps.message.updatedAt?.getTime() === nextProps.message.updatedAt?.getTime() &&
     prevProps.showRegenerate === nextProps.showRegenerate &&
-    prevProps.isRegenerating === nextProps.isRegenerating &&
     prevProps.conversationId === nextProps.conversationId
 );
 

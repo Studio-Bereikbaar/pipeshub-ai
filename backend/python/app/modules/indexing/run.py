@@ -1,3 +1,4 @@
+import time
 from typing import Any, Dict, List
 
 from langchain.schema import Document
@@ -7,6 +8,7 @@ from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
 from app.config.configuration_service import ConfigurationService
 from app.config.constants.arangodb import (
     CollectionNames,
+    ProgressStatus,
 )
 from app.config.constants.service import config_node_constants
 from app.exceptions.indexing_exceptions import (
@@ -543,16 +545,25 @@ class IndexingPipeline:
 
             # Store in vector store
             try:
+                start_time = time.perf_counter()
+                self.logger.info(f"⏱️ Starting embeddings insertion for {len(chunks)} chunks into vector store")
+
                 await self.vector_store.aadd_documents(chunks)
+
+                elapsed_time = time.perf_counter() - start_time
+                if len(chunks) > 0:
+                    self.logger.info(
+                        f"✅ Successfully added {len(chunks)} documents to vector store in {elapsed_time:.2f}s (avg: {elapsed_time/len(chunks)*1000:.2f}ms per document)"
+                    )
+                else:
+                    self.logger.info(
+                        f"✅ Successfully added 0 documents to vector store in {elapsed_time:.2f}s"
+                    )
             except Exception as e:
                 raise VectorStoreError(
                     "Failed to store documents in vector store: " + str(e),
                     details={"error": str(e)},
                 )
-
-            self.logger.info(
-                f"✅ Successfully added {len(chunks)} documents to vector store"
-            )
 
             # Update record with indexing status
             try:
@@ -650,6 +661,8 @@ class IndexingPipeline:
             self.logger.info("🗑️ Proceeding with deletion as no other records exist")
 
             try:
+                await self.arango_service.delete_nodes(keys=[virtual_record_id], collection=CollectionNames.VIRTUAL_RECORD_TO_DOC_ID_MAPPING.value)
+
                 filter_dict = await self.vector_db_service.filter_collection(
                     must={"virtualRecordId": virtual_record_id}
                 )
@@ -666,7 +679,6 @@ class IndexingPipeline:
 
                 ids = [point.id for point in result[0]] #type: ignore
                 self.logger.info(f"🎯 Filter: {filter_dict}")
-                self.logger.info(f"🎯 Ids: {ids}")
 
                 try:
                     await self.get_embedding_model_instance()
@@ -678,6 +690,7 @@ class IndexingPipeline:
 
                 if ids:
                     await self.vector_store.adelete(ids=ids)
+
 
                 self.logger.info(
                     f"✅ Successfully deleted embeddings for record {record_id}"
@@ -700,7 +713,7 @@ class IndexingPipeline:
             )
 
     async def index_documents(
-        self, sentences: List[Dict[str, Any]], merge_documents: bool = False
+        self, sentences: List[Dict[str, Any]],record_id: str
     ) -> List[Document]:
         """
         Main method to index documents through the entire pipeline.
@@ -715,24 +728,57 @@ class IndexingPipeline:
             EmbeddingError: If there's an error creating embeddings
         """
         try:
-            if not sentences:
-                raise DocumentProcessingError("No sentences provided for indexing")
+
 
             # Convert sentences to custom Document class
             try:
-                documents = [
-                    Document(
-                        page_content=sentence["text"],
-                        metadata=sentence.get("metadata", {}),
-                    )
-                    for sentence in sentences
-                ]
+                if sentences is not None and isinstance(sentences, list) and len(sentences) > 0:
+                    documents = [
+                        Document(
+                            page_content=sentence["text"],
+                            metadata=sentence.get("metadata", {}),
+                        )
+                        for sentence in sentences if sentence["text"] is not None and isinstance(sentence["text"], str) and sentence["text"].strip() != ""
+                    ]
+                else:
+                    documents = []
             except Exception as e:
                 raise DocumentProcessingError(
                     "Failed to create document objects: " + str(e),
                     details={"error": str(e)},
                 )
 
+            if len(documents) == 0:
+                record_dict = await self.arango_service.get_document(
+                    record_id, CollectionNames.RECORDS.value
+                )
+
+                if record_dict is None:
+                    self.logger.error(f"Record {record_id} not found in database")
+                    raise DocumentProcessingError(
+                        "Record not found in database",
+                        doc_id=record_id,
+                    )
+                timestamp = get_epoch_timestamp_in_ms()
+                record_dict.update(
+                    {
+                        "indexingStatus": ProgressStatus.EMPTY.value,
+                        "isDirty": False,
+                        "extractionStatus": ProgressStatus.EMPTY.value,
+                        "lastExtractionTimestamp": timestamp,
+                        "lastIndexTimestamp": timestamp,
+                    }
+                )
+
+                docs = [record_dict]
+                success = await self.arango_service.batch_upsert_nodes(
+                    docs, CollectionNames.RECORDS.value
+                )
+                if not success:
+                    raise DocumentProcessingError(
+                        "Failed to update indexing status for record id: " + record_id
+                    )
+                return []
             try:
                 await self.get_embedding_model_instance()
             except Exception as e:
@@ -749,7 +795,6 @@ class IndexingPipeline:
                     "Failed to create or store embeddings: " + str(e),
                     details={"error": str(e)},
                 )
-
             return documents
 
         except IndexingError:

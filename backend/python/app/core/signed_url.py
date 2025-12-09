@@ -83,9 +83,9 @@ class SignedUrlHandler:
     ) -> str:
         """Create a signed URL with optional additional claims"""
         try:
-            expiration = datetime.now(
-                timezone(timedelta(hours=5, minutes=30))
-            ) + timedelta(minutes=self.signed_url_config.expiration_minutes)
+            # Use UTC consistently for both iat and exp
+            now_utc = datetime.now(timezone.utc)
+            expiration = now_utc + timedelta(minutes=self.signed_url_config.expiration_minutes)
 
             endpoints = await self.config_service.get_config(
                 config_node_constants.ENDPOINTS.value
@@ -98,7 +98,7 @@ class SignedUrlHandler:
                 record_id=record_id,
                 user_id=user_id,
                 exp=expiration,
-                iat=datetime.utcnow(),
+                iat=now_utc,
                 additional_claims=additional_claims or {},
             )
 
@@ -137,22 +137,22 @@ class SignedUrlHandler:
     ) -> TokenPayload:
         """Validate the JWT token and optional required claims"""
         try:
-            self.logger.info(f"Validating token: {token}")
+            self.logger.debug(f"Validating token: {token}")
             payload = jwt.decode(
                 token,
                 self.signed_url_config.private_key,
                 algorithms=[self.signed_url_config.algorithm],
             )
-            self.logger.info(f"Payload: {payload}")
+            self.logger.debug(f"Payload: {payload}")
 
-            # Convert timestamps back to datetime for validation
+            # Convert timestamps back to datetime for validation (ensure UTC timezone)
             if "exp" in payload:
-                payload["exp"] = datetime.fromtimestamp(payload["exp"])
+                payload["exp"] = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
             if "iat" in payload:
-                payload["iat"] = datetime.fromtimestamp(payload["iat"])
+                payload["iat"] = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
 
             token_data = TokenPayload(**payload)
-            self.logger.info(f"Token data: {token_data}")
+            self.logger.debug(f"Token data: {token_data}")
 
             if required_claims:
                 for key, value in required_claims.items():

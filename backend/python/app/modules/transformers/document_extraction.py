@@ -13,6 +13,8 @@ from app.modules.extraction.prompt_template import (
 from app.modules.transformers.transformer import TransformContext, Transformer
 from app.utils.llm import get_llm
 
+DEFAULT_CONTEXT_LENGTH = 128000
+CONTENT_TOKEN_RATIO = 0.85
 SentimentType = Literal["Positive", "Neutral", "Negative"]
 
 class SubCategories(BaseModel):
@@ -51,7 +53,11 @@ class DocumentExtraction(Transformer):
     async def apply(self, ctx: TransformContext) -> None:
         record = ctx.record
         blocks = record.block_containers.blocks
+
         document_classification = await self.process_document(blocks, record.org_id)
+        if document_classification is None:
+            record.semantic_metadata = None
+            return
         record.semantic_metadata = SemanticMetadata(
             departments=document_classification.departments,
             languages=document_classification.languages,
@@ -62,40 +68,103 @@ class DocumentExtraction(Transformer):
             sub_category_level_2=document_classification.subcategories.level2,
             sub_category_level_3=document_classification.subcategories.level3,
         )
+        self.logger.info("🎯 Document extraction completed successfully")
 
-    def _prepare_content(self, blocks: List[Block], is_multimodal_llm: bool) -> List[dict]:
 
+    def _prepare_content(self, blocks: List[Block], is_multimodal_llm: bool, context_length: int | None) -> List[dict]:
+        MAX_TOKENS = int(context_length * CONTENT_TOKEN_RATIO)
+        MAX_IMAGES = 50
+        total_tokens = 0
+        image_count = 0
+        image_cap_logged = False
         content = []
+
+        # Lazy import tiktoken; fall back to a rough heuristic if unavailable
+        enc = None
+        try:
+            import tiktoken  # type: ignore
+            try:
+                enc = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                enc = None
+        except Exception:
+            enc = None
+
+        def count_tokens(text: str) -> int:
+            if not text:
+                return 0
+            if enc is not None:
+                try:
+                    return len(enc.encode(text))
+                except Exception:
+                    pass
+            # Fallback heuristic: ~4 chars per token
+            return max(1, len(text) // 4)
 
         for block in blocks:
             if block.type.value == "text":
-                # Add text content
                 if block.data:
-                    content.append({
+                    candidate = {
                         "type": "text",
                         "text": block.data if block.data else ""
-                })
-            elif block.type.value == "image" and is_multimodal_llm:
-                if block.data and block.format.value == "base64":
-                    image_data = block.data
-                    image_data = image_data.get("uri")
+                    }
+                    increment = count_tokens(candidate["text"])
+                    if total_tokens + increment > MAX_TOKENS:
+                        self.logger.info("✂️ Content exceeds %d tokens (%d). Truncating to head.", MAX_TOKENS, total_tokens + increment)
+                        break
+                    content.append(candidate)
+                    total_tokens += increment
+            elif block.type.value == "image":
+                # Respect provider limits on images per request
+                if image_count >= MAX_IMAGES:
+                    if not image_cap_logged:
+                        self.logger.info("🛑 Reached image cap of %d. Skipping additional images.", MAX_IMAGES)
+                        image_cap_logged = True
+                    continue
+                if is_multimodal_llm:
+                    if block.data and block.format.value == "base64":
+                        image_data = block.data
+                        image_data = image_data.get("uri")
 
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": image_data
-                        }
-                    })
+                        # Validate that the image URL is either a valid HTTP/HTTPS URL or a base64 data URL
+                        if image_data and (
+                            image_data.startswith("http://") or
+                            image_data.startswith("https://") or
+                            image_data.startswith("data:image/")
+                        ):
+                            candidate = {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_data
+                                }
+                            }
+                            # Images are provider-specific for token accounting; treat as zero-text here
+                            content.append(candidate)
+                            image_count += 1
+                        else:
+                            self.logger.warning(f"⚠️ Skipping invalid image URL format: {image_data[:100] if image_data else 'None'}")
+                            continue
+                    else:
+                        continue
+                else:
+                    continue
+
             elif block.type.value == "table_row":
                 if block.data:
                     if isinstance(block.data, dict):
                         table_row_text = block.data.get("row_natural_language_text")
                     else:
                         table_row_text = str(block.data)
-                    content.append({
+                    candidate = {
                         "type": "text",
                         "text": table_row_text if table_row_text else ""
-                    })
+                    }
+                    increment = count_tokens(candidate["text"])
+                    if total_tokens + increment > MAX_TOKENS:
+                        self.logger.info("✂️ Content exceeds %d tokens (%d). Truncating to head.", MAX_TOKENS, total_tokens + increment)
+                        break
+                    content.append(candidate)
+                    total_tokens += increment
 
         return content
 
@@ -105,9 +174,13 @@ class DocumentExtraction(Transformer):
         """
         Extract metadata from document content.
         """
-        self.logger.info("🎯 Extracting domain metadata using VLM")
+        self.logger.info("🎯 Extracting domain metadata")
         self.llm, config= await get_llm(self.config_service)
         is_multimodal_llm = config.get("isMultimodal")
+        context_length = config.get("contextLength") or DEFAULT_CONTEXT_LENGTH
+
+        self.logger.info(f"Context length: {context_length}")
+
         try:
             self.logger.info(f"🎯 Extracting departments for org_id: {org_id}")
             departments = await self.arango_service.get_departments(org_id)
@@ -126,8 +199,11 @@ class DocumentExtraction(Transformer):
             self.prompt_template = PromptTemplate.from_template(filled_prompt)
 
             # Prepare multimodal content
-            content = self._prepare_content(blocks, is_multimodal_llm)
+            content = self._prepare_content(blocks, is_multimodal_llm, context_length)
 
+            if len(content) == 0:
+                self.logger.info("No content to process in document extraction")
+                return None
             # Create the multimodal message
             message_content = [
                 {

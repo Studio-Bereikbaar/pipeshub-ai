@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import * as crypto from 'crypto';
 import { AuthenticatedUserRequest } from './../../../libs/middlewares/types';
 import { NextFunction, Response } from 'express';
 import { Logger } from '../../../libs/services/logger.service';
@@ -21,58 +22,56 @@ import {
   ORIGIN_TYPE,
   RECORD_TYPE,
 } from '../constants/record.constants';
+import axios from 'axios';
 import { KeyValueStoreService } from '../../../libs/services/keyValueStore.service';
 import { AppConfig } from '../../tokens_manager/config/config';
-import axios from 'axios';
-
+import { getMimeType } from '../../storage/mimetypes/mimetypes';
+import { HttpMethod } from '../../../libs/enums/http-methods.enum';
+import {
+  executeConnectorCommand,
+  handleBackendError,
+  handleConnectorResponse,
+} from '../../tokens_manager/utils/connector.utils';
 const logger = Logger.getInstance({
   service: 'Knowledge Base Controller',
 });
 
-const CONNECTOR_SERVICE_UNAVAILABLE_MESSAGE =
-  'Connector Service is currently unavailable. Please check your network connection or try again later.';
+// Types and helpers for active connector validation
+interface ConnectorInfo {
+  name: string;
+}
 
-const handleBackendError = (error: any, operation: string): Error => {
-  if (error.response) {
-    const { status, data } = error.response;
-    const errorDetail =
-      data?.detail || data?.reason || data?.message || 'Unknown error';
+interface ActiveConnectorsResponse {
+  connectors: ConnectorInfo[];
+}
 
-    logger.error(`Backend error during ${operation}`, {
-      status,
-      errorDetail,
-      fullResponse: data,
-    });
+const normalizeAppName = (value: string): string =>
+  value.replace(' ', '').toLowerCase();
 
-    if (errorDetail === 'ECONNREFUSED') {
-      throw new InternalServerError(
-        CONNECTOR_SERVICE_UNAVAILABLE_MESSAGE,
-        error,
-      );
-    }
+const validateActiveConnector = async (
+  appName: string,
+  appConfig: AppConfig,
+  headers: Record<string, string>,
+): Promise<void> => {
+  const activeAppsResponse = await executeConnectorCommand(
+    `${appConfig.connectorBackend}/api/v1/connectors/active`,
+    HttpMethod.GET,
+    headers,
+  );
 
-    switch (status) {
-      case 400:
-        return new BadRequestError(errorDetail);
-      case 401:
-        return new UnauthorizedError(errorDetail);
-      case 403:
-        return new ForbiddenError(errorDetail);
-      case 404:
-        return new NotFoundError(errorDetail);
-      case 500:
-        return new InternalServerError(errorDetail);
-      default:
-        return new InternalServerError(`Backend error: ${errorDetail}`);
-    }
+  if (activeAppsResponse.statusCode !== 200) {
+    throw new InternalServerError('Failed to get active connectors');
   }
 
-  if (error.request) {
-    logger.error(`No response from backend during ${operation}`);
-    return new InternalServerError('Backend service unavailable');
-  }
+  const data = activeAppsResponse.data as ActiveConnectorsResponse;
+  const connectors = data?.connectors || [];
+  const allowedApps = connectors.map((connector) =>
+    normalizeAppName(connector.name),
+  );
 
-  return new InternalServerError(`${operation} failed: ${error.message}`);
+  if (!allowedApps.includes(normalizeAppName(appName))) {
+    throw new BadRequestError(`Connector ${appName} not allowed`);
+  }
 };
 
 export const createKnowledgeBase =
@@ -92,27 +91,26 @@ export const createKnowledgeBase =
 
       logger.info(`Creating knowledge base '${kbName}' for user ${userId}`);
 
-      const response = await axios.post(
+      const response = await executeConnectorCommand(
         `${appConfig.connectorBackend}/api/v1/kb/`,
+        HttpMethod.POST,
+        req.headers as Record<string, string>,
         {
-          userId: userId,
-          orgId: orgId,
           name: kbName,
         },
       );
 
-      if (response.status !== 200) {
-        throw new InternalServerError('Failed to create knowledge base');
-      }
-
-      const kbInfo = response.data;
-
+      handleConnectorResponse(
+        response,
+        res,
+        'Creating knowledge base',
+        'Knowledge base creation failed',
+      );
       logger.info(`Knowledge base '${kbName}' created successfully`);
-
-      res.status(201).json(kbInfo);
     } catch (error: any) {
       logger.error('Error creating knowledge base', { error: error.message });
-      next(error);
+      const handleError = handleBackendError(error, 'create knowledge base');
+      next(handleError);
     }
   };
 
@@ -133,21 +131,18 @@ export const getKnowledgeBase =
 
       logger.info(`Getting knowledge base ${kbId} for user ${userId}`);
 
-      const kbResponse = await axios.get(
-        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/user/${userId}`,
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}`,
+        HttpMethod.GET,
+        req.headers as Record<string, string>,
       );
 
-      if (kbResponse.status !== 200) {
-        throw new InternalServerError('Failed to create knowledge base');
-      }
-
-      const kbData = kbResponse.data;
-
-      if (!kbResponse) {
-        throw new NotFoundError('Knowledge base not found');
-      }
-
-      res.status(200).json(kbData);
+      handleConnectorResponse(
+        response,
+        res,
+        'Getting knowledge base',
+        'Knowledge base not found',
+      );
     } catch (error: any) {
       logger.error('Error getting knowledge base', {
         error: error.message,
@@ -249,42 +244,38 @@ export const listKnowledgeBases =
         },
       );
 
-      const response = await axios.get(
-        `${appConfig.connectorBackend}/api/v1/kb/user/${userId}/org/${orgId}`,
-        {
-          params: {
-            page,
-            limit,
-            search,
-            permissions: permissions?.join(','),
-            sort_by: sortBy,
-            sort_order: sortOrder,
-          },
-        },
+      const queryParams = new URLSearchParams();
+      if (page) queryParams.set('page', String(page));
+      if (limit) queryParams.set('limit', String(limit));
+      if (search) queryParams.set('search', String(search));
+      if (permissions)
+        queryParams.set('permissions', String(permissions?.join(',')));
+      if (sortBy) queryParams.set('sort_by', String(sortBy));
+      if (sortOrder) queryParams.set('sort_order', String(sortOrder));
+
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/?${queryParams.toString()}`,
+        HttpMethod.GET,
+        req.headers as Record<string, string>,
       );
 
-      if (response.status !== 200) {
-        throw new InternalServerError('Failed to get knowledge bases');
-      }
-
-      const result = response.data;
+      handleConnectorResponse(
+        response,
+        res,
+        'Getting knowledge bases',
+        'Knowledge bases not found',
+      );
 
       // Log successful retrieval
-      logger.info('Knowledge bases retrieved successfully', {
-        totalKnowledgeBases: result.pagination?.totalCount || 0,
-        page: result.pagination?.page || page,
-        userId,
-        orgId,
-      });
-
-      res.status(200).json(result);
+      logger.info('Knowledge bases retrieved successfully');
     } catch (error: any) {
       logger.error('Error listing knowledge bases', {
         error: error.message,
         userId: req.user?.userId,
         orgId: req.user?.orgId,
       });
-      next(error);
+      const handleError = handleBackendError(error, 'list knowledge bases');
+      next(handleError);
     }
   };
 
@@ -306,29 +297,25 @@ export const updateKnowledgeBase =
 
       logger.info(`Updating knowledge base ${kbId}`);
 
-      const response = await axios.put(
-        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/user/${userId}`,
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}`,
+        HttpMethod.PUT,
+        req.headers as Record<string, string>,
         {
           groupName: kbName,
         },
       );
 
-      if (response.status !== 200) {
-        throw new ForbiddenError(
-          'Permission denied or knowledge base not found',
-        );
-      }
-
-      res.status(200).json({
-        message: 'Knowledge base updated successfully',
-        meta: {
-          requestId: req.context?.requestId,
-          timestamp: new Date().toISOString(),
-        },
-      });
+      handleConnectorResponse(
+        response,
+        res,
+        'Updating knowledge base',
+        'Knowledge base not found',
+      );
     } catch (error: any) {
       logger.error('Error updating knowledge base', { error: error.message });
-      next(error);
+      const handleError = handleBackendError(error, 'update knowledge base');
+      next(handleError);
     }
   };
 
@@ -348,26 +335,22 @@ export const deleteKnowledgeBase =
       }
       logger.info(`Deleting knowledge base ${kbId}`);
 
-      const response = await axios.delete(
-        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/user/${userId}`,
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}`,
+        HttpMethod.DELETE,
+        req.headers as Record<string, string>,
       );
 
-      if (response.status !== 200) {
-        throw new ForbiddenError(
-          'Permission denied or knowledge base not found',
-        );
-      }
-
-      res.status(200).json({
-        message: 'Knowledge base deleted successfully',
-        meta: {
-          requestId: req.context?.requestId,
-          timestamp: new Date().toISOString(),
-        },
-      });
+      handleConnectorResponse(
+        response,
+        res,
+        'Deleting knowledge base',
+        'Knowledge base not found',
+      );
     } catch (error: any) {
       logger.error('Error deleting knowledge base', { error: error.message });
-      next(error);
+      const handleError = handleBackendError(error, 'delete knowledge base');
+      next(handleError);
     }
   };
 
@@ -389,18 +372,21 @@ export const createRootFolder =
 
       logger.info(`Creating folder '${folderName}' in KB ${kbId}`);
 
-      const response = await axios.post(
+      const response = await executeConnectorCommand(
         `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder`,
+        HttpMethod.POST,
+        req.headers as Record<string, string>,
         {
-          userId: userId,
-          orgId: orgId,
           name: folderName,
         },
       );
 
-      const folderInfo = response.data;
-
-      res.status(201).json(folderInfo);
+      handleConnectorResponse(
+        response,
+        res,
+        'Creating folder',
+        'Folder not found',
+      );
     } catch (error: any) {
       logger.error('Error creating folder for knowledge base', {
         error: error.message,
@@ -432,18 +418,21 @@ export const createNestedFolder =
 
       logger.info(`Creating folder '${folderName}' in folder ${folderId}`);
 
-      const response = await axios.post(
+      const response = await executeConnectorCommand(
         `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}/subfolder`,
+        HttpMethod.POST,
+        req.headers as Record<string, string>,
         {
-          userId: userId,
-          orgId: orgId,
           name: folderName,
         },
       );
 
-      const folderInfo = response.data;
-
-      res.status(201).json(folderInfo);
+      handleConnectorResponse(
+        response,
+        res,
+        'Creating nested folder',
+        'Folder not found',
+      );
     } catch (error: any) {
       logger.error('Error creating subfolder folder', {
         error: error.message,
@@ -474,22 +463,19 @@ export const updateFolder =
 
       logger.info(`Updating folder ${folderId} in KB ${kbId}`);
 
-      const response = await axios.put(
-        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}/user/${userId}`,
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}`,
+        HttpMethod.PUT,
+        req.headers as Record<string, string>,
         { name: folderName },
       );
 
-      if (response.status !== 200) {
-        throw new InternalServerError('Failed to update folder');
-      }
-
-      res.status(200).json({
-        message: 'Folder updated successfully',
-        meta: {
-          requestId: req.context?.requestId,
-          timestamp: new Date().toISOString(),
-        },
-      });
+      handleConnectorResponse(
+        response,
+        res,
+        'Updating folder',
+        'Folder not found',
+      );
     } catch (error: any) {
       logger.error('Error updating folder for knowledge base', {
         error: error.message,
@@ -520,21 +506,18 @@ export const deleteFolder =
 
       logger.info(`Deleting folder ${folderId} in KB ${kbId}`);
 
-      const response = await axios.delete(
-        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}/user/${userId}`,
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}`,
+        HttpMethod.DELETE,
+        req.headers as Record<string, string>,
       );
 
-      if (response.status !== 200) {
-        throw new InternalServerError('Failed to delete folder');
-      }
-
-      res.status(200).json({
-        message: 'Folder deleted successfully',
-        meta: {
-          requestId: req.context?.requestId,
-          timestamp: new Date().toISOString(),
-        },
-      });
+      handleConnectorResponse(
+        response,
+        res,
+        'Deleting folder',
+        'Folder not found',
+      );
     } catch (error: any) {
       logger.error('Error deleting folder for knowledge base', {
         error: error.message,
@@ -618,6 +601,9 @@ export const uploadRecordsToKB =
           ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase()
           : null;
 
+        // Use correct MIME type mapping instead of browser detection
+        const correctMimeType =
+          (extension && getMimeType(extension)) || mimetype;
         // Generate unique ID for the record
         const key: string = uuidv4();
         const webUrl = `/record/${key}`;
@@ -644,7 +630,7 @@ export const uploadRecordsToKB =
           indexingStatus: INDEXING_STATUS.NOT_STARTED,
           version: 1,
           webUrl: webUrl,
-          mimeType: mimetype,
+          mimeType: correctMimeType,
         };
 
         const fileRecord: IFileRecordDocument = {
@@ -653,7 +639,7 @@ export const uploadRecordsToKB =
           name: fileName,
           isFile: true,
           extension: extension,
-          mimeType: mimetype,
+          mimeType: correctMimeType,
           sizeInBytes: size,
           webUrl: webUrl,
           // path: filePath,
@@ -688,53 +674,26 @@ export const uploadRecordsToKB =
 
       console.log('✅ Files processed, calling Python service');
 
-      // Single API call to Python service with all data
-      try {
-        const response = await axios.post(
-          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/upload`,
-          {
-            userId: userId,
-            orgId: orgId,
-            files: processedFiles.map((pf) => ({
-              record: pf.record,
-              fileRecord: pf.fileRecord,
-              filePath: pf.filePath,
-              lastModified: pf.lastModified,
-            })),
-          },
-          {
-            headers: { 'Content-Type': 'application/json' },
-          },
-        );
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/upload`,
+        HttpMethod.POST,
+        req.headers as Record<string, string>,
+        {
+          files: processedFiles.map((pf) => ({
+            record: pf.record,
+            fileRecord: pf.fileRecord,
+            filePath: pf.filePath,
+            lastModified: pf.lastModified,
+          })),
+        },
+      );
 
-        if (response.status === 200 || response.status === 201) {
-          const result = response.data;
-
-          console.log('✅ Upload completed:', {
-            totalCreated: result.total_created,
-            foldersCreated: result.folders_created,
-          });
-
-          res.status(201).json(result);
-        } else {
-          throw new InternalServerError(
-            'Failed to process upload in Python service',
-          );
-        }
-      } catch (pythonError: any) {
-        console.error('❌ Python service call failed:', pythonError.message);
-
-        if (pythonError.response?.status === 403) {
-          throw new BadRequestError('Permission denied for upload');
-        } else if (pythonError.response?.status === 404) {
-          throw new BadRequestError('Knowledge base not found');
-        } else {
-          throw new InternalServerError(
-            pythonError.response?.data?.message ||
-              'Failed to process upload. Please try again.',
-          );
-        }
-      }
+      handleConnectorResponse(
+        response,
+        res,
+        'Upload not found',
+        'Failed to process upload',
+      );
     } catch (error: any) {
       console.error('❌ Record upload failed:', {
         error: error.message,
@@ -817,6 +776,9 @@ export const uploadRecordsToFolder =
           ? fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase()
           : null;
 
+        // Use correct MIME type mapping instead of browser detection
+        const correctMimeType = extension ? getMimeType(extension) : mimetype;
+
         // Generate unique ID for the record
         const key: string = uuidv4();
         const webUrl = `/record/${key}`;
@@ -843,7 +805,7 @@ export const uploadRecordsToFolder =
           indexingStatus: INDEXING_STATUS.NOT_STARTED,
           version: 1,
           webUrl: webUrl,
-          mimeType: mimetype,
+          mimeType: correctMimeType,
         };
 
         const fileRecord: IFileRecordDocument = {
@@ -852,7 +814,7 @@ export const uploadRecordsToFolder =
           name: fileName,
           isFile: true,
           extension: extension,
-          mimeType: mimetype,
+          mimeType: correctMimeType,
           sizeInBytes: size,
           webUrl: webUrl,
           // path: filePath,
@@ -886,56 +848,29 @@ export const uploadRecordsToFolder =
       }
 
       console.log(
-        '✅ Files processed, calling Python service for folder upload', 
+        '✅ Files processed, calling Python service for folder upload',
       );
 
-      // Single API call to Python service with all data
-      try {
-        const response = await axios.post(
-          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}/upload`,
-          {
-            userId: userId,
-            orgId: orgId,
-            files: processedFiles.map((pf) => ({
-              record: pf.record,
-              fileRecord: pf.fileRecord,
-              filePath: pf.filePath,
-              lastModified: pf.lastModified,
-            })),
-          },
-          {
-            headers: { 'Content-Type': 'application/json' },
-          },
-        );
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}/upload`,
+        HttpMethod.POST,
+        req.headers as Record<string, string>,
+        {
+          files: processedFiles.map((pf) => ({
+            record: pf.record,
+            fileRecord: pf.fileRecord,
+            filePath: pf.filePath,
+            lastModified: pf.lastModified,
+          })),
+        },
+      );
 
-        if (response.status === 200 || response.status === 201) {
-          const result = response.data;
-
-          console.log('✅ Folder upload completed:', {
-            totalCreated: result.total_created,
-            foldersCreated: result.folders_created,
-          });
-
-          res.status(201).json(result);
-        } else {
-          throw new InternalServerError(
-            'Failed to process upload in Python service',
-          );
-        }
-      } catch (pythonError: any) {
-        console.error('❌ Python service call failed:', pythonError.message);
-
-        if (pythonError.response?.status === 403) {
-          throw new BadRequestError('Permission denied for upload');
-        } else if (pythonError.response?.status === 404) {
-          throw new BadRequestError('Knowledge base or folder not found');
-        } else {
-          throw new InternalServerError(
-            pythonError.response?.data?.message ||
-              'Failed to process upload. Please try again.',
-          );
-        }
-      }
+      handleConnectorResponse(
+        response,
+        res,
+        'Uploading records to KB',
+        'Records not found',
+      );
     } catch (error: any) {
       console.error('❌ Folder record upload failed:', {
         error: error.message,
@@ -969,7 +904,7 @@ export const updateRecord =
 
       // Check if there's a file in the request
       const hasFileBuffer = req.body.fileBuffer && req.body.fileBuffer.buffer;
-      let originalname, mimetype, size, extension, lastModified;
+      let originalname, mimetype, size, extension, lastModified, sha256Hash;
 
       if (hasFileBuffer) {
         ({ originalname, mimetype, size, lastModified } = req.body.fileBuffer);
@@ -980,6 +915,9 @@ export const updateRecord =
               .substring(originalname.lastIndexOf('.') + 1)
               .toLowerCase()
           : null;
+        // Calculate SHA-256 checksum for security
+        const buffer = req.body.fileBuffer.buffer;
+        sha256Hash = crypto.createHash('sha256').update(buffer).digest('hex');
       }
 
       if (!recordName) {
@@ -1001,6 +939,7 @@ export const updateRecord =
           size,
           extension,
           lastModified,
+          sha256Hash,
         };
 
         // Get filename without extension to use as record name
@@ -1023,151 +962,133 @@ export const updateRecord =
         updatedFields: Object.keys(updatedData),
       });
 
-      try {
-        // Call the Python service to update the record
-        const response = await axios.put(
-          `${appConfig.connectorBackend}/api/v1/kb/record/${recordId}`,
-          {
-            userId: userId,
-            updates: updatedData,
-            fileMetadata: fileMetadata,
-          },
+      // Call the Python service to update the record
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/record/${recordId}`,
+        HttpMethod.PUT,
+        req.headers as Record<string, string>,
+        {
+          updates: updatedData,
+          fileMetadata: fileMetadata,
+        },
+      );
+
+      const updateRecordResponse = response.data as any;
+
+      if (!updateRecordResponse) {
+        throw new InternalServerError(
+          'Python service indicated failure to update record',
         );
+      }
 
-        const updateRecordResponse = response.data;
+      if (!updateRecordResponse.updatedRecord) {
+        throw new InternalServerError(
+          'Python service indicated failure to update record',
+        );
+      }
 
-        if (!updateRecordResponse.success) {
-          throw new InternalServerError(
-            'Python service indicated failure to update record',
+      const updateResult = updateRecordResponse.updatedRecord;
+
+      // STEP 2: Upload file to storage ONLY after database update succeeds
+      let fileUploaded = false;
+      let storageDocumentId = null;
+
+      if (hasFileBuffer && updateResult?.record) {
+        // Use the externalRecordId as the storageDocumentId
+        storageDocumentId = updateResult.record.externalRecordId;
+
+        // Check if we have a valid externalRecordId to use
+        if (!storageDocumentId) {
+          logger.error('No external record ID found after database update', {
+            recordId,
+            updatedRecord: updateResult?.record._key,
+          });
+          throw new BadRequestError(
+            'Cannot update file: No external record ID found for this record',
           );
         }
 
-        const updateResult = updateRecordResponse.updatedRecord;
+        // Log the file upload attempt
+        logger.info('Uploading new version of file to storage', {
+          recordId,
+          fileName: originalname,
+          fileSize: size,
+          mimeType: mimetype,
+          extension,
+          storageDocumentId: storageDocumentId,
+          version: updateResult?.record.version,
+        });
 
-        // STEP 2: Upload file to storage ONLY after database update succeeds
-        let fileUploaded = false;
-        let storageDocumentId = null;
+        try {
+          // Update version through storage service using externalRecordId
+          const fileBuffer = req.body.fileBuffer;
+          await uploadNextVersionToStorage(
+            req,
+            fileBuffer,
+            storageDocumentId,
+            keyValueStoreService,
+            appConfig.storage, // Fixed: use appConfig.storage instead of defaultConfig
+          );
 
-        if (hasFileBuffer && updateResult.record) {
-          // Use the externalRecordId as the storageDocumentId
-          storageDocumentId = updateResult.record.externalRecordId;
-
-          // Check if we have a valid externalRecordId to use
-          if (!storageDocumentId) {
-            logger.error('No external record ID found after database update', {
-              recordId,
-              updatedRecord: updateResult.record._key,
-            });
-            throw new BadRequestError(
-              'Cannot update file: No external record ID found for this record',
-            );
-          }
-
-          // Log the file upload attempt
-          logger.info('Uploading new version of file to storage', {
+          logger.info('File uploaded to storage successfully', {
             recordId,
-            fileName: originalname,
-            fileSize: size,
-            mimeType: mimetype,
-            extension,
-            storageDocumentId: storageDocumentId,
-            version: updateResult.record.version,
+            storageDocumentId,
+            version: updateResult?.record.version,
           });
 
-          try {
-            // Update version through storage service using externalRecordId
-            const fileBuffer = req.body.fileBuffer;
-            await uploadNextVersionToStorage(
-              req,
-              fileBuffer,
-              storageDocumentId,
-              keyValueStoreService,
-              appConfig.storage, // Fixed: use appConfig.storage instead of defaultConfig
-            );
+          fileUploaded = true;
+        } catch (storageError: any) {
+          logger.error(
+            'Failed to upload file to storage after database update',
+            {
+              recordId,
+              storageDocumentId: storageDocumentId,
+              error: storageError.message,
+              version: updateResult.record.version,
+            },
+          );
 
-            logger.info('File uploaded to storage successfully', {
+          // Log the inconsistent state but don't fail the request
+          // since the database update was successful
+          logger.warn(
+            'Database updated but storage upload failed - inconsistent state',
+            {
               recordId,
               storageDocumentId,
-              version: updateResult.record.version,
-            });
-
-            fileUploaded = true;
-          } catch (storageError: any) {
-            logger.error(
-              'Failed to upload file to storage after database update',
-              {
-                recordId,
-                storageDocumentId: storageDocumentId,
-                error: storageError.message,
-                version: updateResult.record.version,
-              },
-            );
-
-            // Log the inconsistent state but don't fail the request
-            // since the database update was successful
-            logger.warn(
-              'Database updated but storage upload failed - inconsistent state',
-              {
-                recordId,
-                storageDocumentId,
-                databaseVersion: updateResult.record.version,
-              },
-            );
-
-            throw new InternalServerError(
-              `Record updated but file upload failed: ${storageError.message}. Please retry the file upload.`,
-            );
-          }
-        }
-
-        // Log the successful update
-        logger.info('Record updated successfully', {
-          recordId,
-          userId,
-          orgId,
-          fileUploaded,
-          newFileName: fileUploaded ? originalname : undefined,
-          updatedFields: Object.keys(updatedData),
-          version: updateResult.record?.version,
-          requestId: req.context?.requestId,
-        });
-
-        // Return the updated record
-        res.status(200).json({
-          message: fileUploaded
-            ? 'Record updated with new file version'
-            : 'Record updated successfully',
-          record: updateResult.record,
-          fileUploaded,
-          meta: {
-            requestId: req.context?.requestId,
-            timestamp: new Date().toISOString(),
-          },
-        });
-      } catch (pythonServiceError: any) {
-        logger.error('Error calling Python service for record update', {
-          recordId,
-          error: pythonServiceError.message,
-          response: pythonServiceError.response?.data,
-        });
-
-        // Handle different error types from Python service
-        if (pythonServiceError.response?.status === 403) {
-          throw new ForbiddenError('Permission denied for record update');
-        } else if (pythonServiceError.response?.status === 404) {
-          throw new NotFoundError(
-            'Record, folder, or knowledge base not found',
+              databaseVersion: updateResult.record.version,
+            },
           );
-        } else if (pythonServiceError.response?.status === 400) {
-          throw new BadRequestError(
-            pythonServiceError.response?.data?.reason || 'Invalid update data',
-          );
-        } else {
+
           throw new InternalServerError(
-            `Failed to update record: ${pythonServiceError.message}`,
+            `Record updated but file upload failed: ${storageError.message}. Please retry the file upload.`,
           );
         }
       }
+
+      // Log the successful update
+      logger.info('Record updated successfully', {
+        recordId,
+        userId,
+        orgId,
+        fileUploaded,
+        newFileName: fileUploaded ? originalname : undefined,
+        updatedFields: Object.keys(updatedData),
+        version: updateResult.record?.version,
+        requestId: req.context?.requestId,
+      });
+
+      // Return the updated record
+      res.status(200).json({
+        message: fileUploaded
+          ? 'Record updated with new file version'
+          : 'Record updated successfully',
+        record: updateResult.record,
+        fileUploaded,
+        meta: {
+          requestId: req.context?.requestId,
+          timestamp: new Date().toISOString(),
+        },
+      });
     } catch (error: any) {
       // Log the error for debugging
       logger.error('Error updating folder record', {
@@ -1179,8 +1100,8 @@ export const updateRecord =
         orgId: req.user?.orgId,
         requestId: req.context?.requestId,
       });
-
-      next(error);
+      const handleError = handleBackendError(error, 'update record');
+      next(handleError);
     }
   };
 
@@ -1275,75 +1196,57 @@ export const getKBContent =
         requestId: req.context?.requestId,
       });
 
-      try {
-        // Call the Python service to get KB records
-        const response = await axios.get(
-          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/children`,
-          {
-            params: {
-              user_id: userId,
-              page,
-              limit,
-              search,
-              record_types: recordTypes?.join(','),
-              origins: origins?.join(','),
-              connectors: connectors?.join(','),
-              indexing_status: indexingStatus?.join(','),
-              date_from: dateFrom,
-              date_to: dateTo,
-              sort_by: sortBy,
-              sort_order: sortOrder,
-            },
-            timeout: 30000,
-          },
-        );
-
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to get KB records via Python service',
-          );
-        }
-
-        const result = response.data;
-
-        // Log successful retrieval
-        logger.info('KB records retrieved successfully', {
-          kbId,
-          totalRecords: result.pagination?.totalCount || 0,
-          page: result.pagination?.page || page,
-          userId,
-          requestId: req.context?.requestId,
-        });
-
-        // Send response
-        res.status(200).json(result);
-      } catch (pythonServiceError: any) {
-        logger.error('Error calling Python service for KB records', {
-          kbId,
-          userId,
-          error: pythonServiceError.message,
-          response: pythonServiceError.response?.data,
-          requestId: req.context?.requestId,
-        });
-
-        // Handle different error types from Python service
-        if (pythonServiceError.response?.status === 403) {
-          throw new ForbiddenError(
-            'You do not have permission to access this knowledge base',
-          );
-        } else if (pythonServiceError.response?.status === 404) {
-          throw new NotFoundError('Knowledge base not found');
-        } else if (pythonServiceError.response?.status === 400) {
-          throw new BadRequestError(
-            pythonServiceError.response?.data?.reason ||
-              'Invalid request parameters',
-          );
-        } else {
-          throw new InternalServerError(
-            `Failed to get KB records: ${pythonServiceError.message}`,
-          );
-        }
+      const queryParams = new URLSearchParams();
+      if (page) {
+        queryParams.append('page', page.toString());
       }
+      if (limit) {
+        queryParams.append('limit', limit.toString());
+      }
+      if (search) {
+        queryParams.append('search', search);
+      }
+      if (recordTypes) {
+        queryParams.append('record_types', recordTypes.join(','));
+      }
+      if (origins) {
+        queryParams.append('origins', origins.join(','));
+      }
+      if (connectors) {
+        queryParams.append('connectors', connectors.join(','));
+      }
+      if (indexingStatus) {
+        queryParams.append('indexing_status', indexingStatus.join(','));
+      }
+      if (dateFrom) {
+        queryParams.append('date_from', dateFrom.toString());
+      }
+      if (dateTo) {
+        queryParams.append('date_to', dateTo.toString());
+      }
+      if (sortBy) {
+        queryParams.append('sort_by', sortBy);
+      }
+      if (sortOrder) {
+        queryParams.append('sort_order', sortOrder);
+      }
+
+      // Call the Python service to get KB records
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/children?${queryParams.toString()}`,
+        HttpMethod.GET,
+        req.headers as Record<string, string>,
+      );
+
+      handleConnectorResponse(
+        response,
+        res,
+        'Getting KB records',
+        'KB records not found',
+      );
+
+      // Log successful retrieval
+      logger.info('KB records retrieved successfully', kbId);
     } catch (error: any) {
       logger.error('Error getting KB records', {
         kbId: req.params.kbId,
@@ -1353,7 +1256,8 @@ export const getKBContent =
         stack: error.stack,
         requestId: req.context?.requestId,
       });
-      next(error);
+      const handleError = handleBackendError(error, 'get KB records');
+      next(handleError);
     }
   };
 
@@ -1448,75 +1352,57 @@ export const getFolderContents =
         requestId: req.context?.requestId,
       });
 
-      try {
-        // Call the Python service to get KB records
-        const response = await axios.get(
-          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}/children`,
-          {
-            params: {
-              user_id: userId,
-              page,
-              limit,
-              search,
-              record_types: recordTypes?.join(','),
-              origins: origins?.join(','),
-              connectors: connectors?.join(','),
-              indexing_status: indexingStatus?.join(','),
-              date_from: dateFrom,
-              date_to: dateTo,
-              sort_by: sortBy,
-              sort_order: sortOrder,
-            },
-            timeout: 30000,
-          },
-        );
-
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to get KB records via Python service',
-          );
-        }
-
-        const result = response.data;
-
-        // Log successful retrieval
-        logger.info('KB records retrieved successfully', {
-          kbId,
-          totalRecords: result.pagination?.totalCount || 0,
-          page: result.pagination?.page || page,
-          userId,
-          requestId: req.context?.requestId,
-        });
-
-        // Send response
-        res.status(200).json(result);
-      } catch (pythonServiceError: any) {
-        logger.error('Error calling Python service for KB records', {
-          kbId,
-          userId,
-          error: pythonServiceError.message,
-          response: pythonServiceError.response?.data,
-          requestId: req.context?.requestId,
-        });
-
-        // Handle different error types from Python service
-        if (pythonServiceError.response?.status === 403) {
-          throw new ForbiddenError(
-            'You do not have permission to access this knowledge base',
-          );
-        } else if (pythonServiceError.response?.status === 404) {
-          throw new NotFoundError('Knowledge base not found');
-        } else if (pythonServiceError.response?.status === 400) {
-          throw new BadRequestError(
-            pythonServiceError.response?.data?.reason ||
-              'Invalid request parameters',
-          );
-        } else {
-          throw new InternalServerError(
-            `Failed to get KB records: ${pythonServiceError.message}`,
-          );
-        }
+      const queryParams = new URLSearchParams();
+      if (page) {
+        queryParams.append('page', page.toString());
       }
+      if (limit) {
+        queryParams.append('limit', limit.toString());
+      }
+      if (search) {
+        queryParams.append('search', search);
+      }
+      if (recordTypes) {
+        queryParams.append('record_types', recordTypes.join(','));
+      }
+      if (origins) {
+        queryParams.append('origins', origins.join(','));
+      }
+      if (connectors) {
+        queryParams.append('connectors', connectors.join(','));
+      }
+      if (indexingStatus) {
+        queryParams.append('indexing_status', indexingStatus.join(','));
+      }
+      if (dateFrom) {
+        queryParams.append('date_from', dateFrom.toString());
+      }
+      if (dateTo) {
+        queryParams.append('date_to', dateTo.toString());
+      }
+      if (sortBy) {
+        queryParams.append('sort_by', sortBy);
+      }
+      if (sortOrder) {
+        queryParams.append('sort_order', sortOrder);
+      }
+
+      // Call the Python service to get KB records
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/kb/${kbId}/folder/${folderId}/children?${queryParams.toString()}`,
+        HttpMethod.GET,
+        req.headers as Record<string, string>,
+      );
+
+      handleConnectorResponse(
+        response,
+        res,
+        'Getting folder contents',
+        'Folder contents not found',
+      );
+
+      // Log successful retrieval
+      logger.info('KB records retrieved successfully', kbId);
     } catch (error: any) {
       logger.error('Error getting KB records', {
         kbId: req.params.kbId,
@@ -1526,7 +1412,8 @@ export const getFolderContents =
         stack: error.stack,
         requestId: req.context?.requestId,
       });
-      next(error);
+      const handleError = handleBackendError(error, 'get KB records');
+      next(handleError);
     }
   };
 
@@ -1627,104 +1514,98 @@ export const getAllRecords =
         requestId: req.context?.requestId,
       });
 
-      try {
-        // Call the Python service to get all records
-        const response = await axios.get(
-          // `${appConfig.connectorBackend}/api/v1/kb/records/user/${userId}/org/${orgId}`,
-          `${appConfig.connectorBackend}/api/v1/records`,
-          {
-            params: {
-              user_id: userId,
-              org_id: orgId,
-              page,
-              limit,
-              search,
-              record_types: recordTypes?.join(','),
-              origins: origins?.join(','),
-              connectors: connectors?.join(','),
-              permissions: permissions?.join(','),
-              indexing_status: indexingStatus?.join(','),
-              date_from: dateFrom,
-              date_to: dateTo,
-              sort_by: sortBy,
-              sort_order: sortOrder,
-              source,
-            },
-            timeout: 30000,
-          },
-        );
+      const queryParams = new URLSearchParams();
 
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to get all records via Python service',
-          );
-        }
-
-        const result = response.data;
-
-        // Log successful retrieval
-        logger.info('All records retrieved successfully', {
-          totalRecords: result.pagination?.totalCount || 0,
-          page: result.pagination?.page || page,
-          userId,
-          orgId,
-          source,
-          requestId: req.context?.requestId,
-        });
-
-        // Send response
-        res.status(200).json({
-          records: result.records || [],
-          pagination: {
-            page: result.pagination?.page || page,
-            limit: result.pagination?.limit || limit,
-            totalCount: result.pagination?.totalCount || 0,
-            totalPages: result.pagination?.totalPages || 0,
-          },
-          filters: {
-            applied: {
-              search,
-              recordTypes,
-              origins,
-              connectors,
-              permissions,
-              indexingStatus,
-              source: source !== 'all' ? source : null,
-              dateRange:
-                dateFrom || dateTo ? { from: dateFrom, to: dateTo } : null,
-              sortBy,
-              sortOrder,
-            },
-            available: result.filters?.available || {},
-          },
-        });
-      } catch (pythonServiceError: any) {
-        logger.error('Error calling Python service for all records', {
-          userId,
-          orgId,
-          error: pythonServiceError.message,
-          response: pythonServiceError.response?.data,
-          requestId: req.context?.requestId,
-        });
-
-        // Handle different error types from Python service
-        if (pythonServiceError.response?.status === 403) {
-          throw new ForbiddenError(
-            'You do not have permission to access records',
-          );
-        } else if (pythonServiceError.response?.status === 404) {
-          throw new NotFoundError('No records found or user not found');
-        } else if (pythonServiceError.response?.status === 400) {
-          throw new BadRequestError(
-            pythonServiceError.response?.data?.reason ||
-              'Invalid request parameters',
-          );
-        } else {
-          throw new InternalServerError(
-            `Failed to get all records: ${pythonServiceError.message}`,
-          );
-        }
+      if (page) {
+        queryParams.append('page', page.toString());
       }
+      if (limit) {
+        queryParams.append('limit', limit.toString());
+      }
+      if (search) {
+        queryParams.append('search', search);
+      }
+      if (recordTypes) {
+        queryParams.append('record_types', recordTypes.join(','));
+      }
+      if (origins) {
+        queryParams.append('origins', origins.join(','));
+      }
+      if (connectors) {
+        queryParams.append('connectors', connectors.join(','));
+      }
+      if (permissions) {
+        queryParams.append('permissions', permissions.join(','));
+      }
+      if (indexingStatus) {
+        queryParams.append('indexing_status', indexingStatus.join(','));
+      }
+      if (dateFrom) {
+        queryParams.append('date_from', dateFrom.toString());
+      }
+      if (dateTo) {
+        queryParams.append('date_to', dateTo.toString());
+      }
+      if (sortBy) {
+        queryParams.append('sort_by', sortBy);
+      }
+      if (sortOrder) {
+        queryParams.append('sort_order', sortOrder);
+      }
+      if (source) {
+        queryParams.append('source', source);
+      }
+
+      // Call the Python service to get all records
+      const response = await executeConnectorCommand(
+        // `${appConfig.connectorBackend}/api/v1/kb/records/user/${userId}/org/${orgId}`,
+        `${appConfig.connectorBackend}/api/v1/records?${queryParams.toString()}`,
+        HttpMethod.GET,
+        req.headers as Record<string, string>,
+      );
+
+      if (response.statusCode !== 200) {
+        throw new InternalServerError('Failed to get all records');
+      }
+
+      const result = response.data as any;
+
+      // Log successful retrieval
+      logger.info('All records retrieved successfully', {
+        totalRecords: result.pagination?.totalCount || 0,
+        page: result.pagination?.page || page,
+        userId,
+        orgId,
+        source,
+        requestId: req.context?.requestId,
+      });
+
+      // Send response
+      res.status(200).json({
+        records: result.records || [],
+        pagination: {
+          page: result.pagination?.page || page,
+          limit: result.pagination?.limit || limit,
+          totalCount: result.pagination?.totalCount || 0,
+          totalPages: result.pagination?.totalPages || 0,
+        },
+        filters: {
+          applied: {
+            search,
+            recordTypes,
+            origins,
+            connectors,
+            permissions,
+            indexingStatus,
+            source: source !== 'all' ? source : null,
+            dateRange:
+              dateFrom || dateTo ? { from: dateFrom, to: dateTo } : null,
+            sortBy,
+            sortOrder,
+          },
+          available: result.filters?.available || {},
+        },
+      });
     } catch (error: any) {
       // Handle permission errors
       if (
@@ -1745,7 +1626,8 @@ export const getAllRecords =
         stack: error instanceof Error ? error.stack : undefined,
         requestId: req.context?.requestId,
       });
-      next(error);
+      const handleError = handleBackendError(error, 'get all records');
+      next(handleError);
     }
   };
 
@@ -1763,68 +1645,29 @@ export const getRecordById =
         );
       }
 
-      try {
-        // Call the Python service to get record
-        const response = await axios.get(
-          `${appConfig.connectorBackend}/api/v1/records/${recordId}`,
-          {
-            params: {
-              user_id: userId,
-              org_id: orgId,
-            },
-          },
-        );
+      // Call the Python service to get record
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/records/${recordId}`,
+        HttpMethod.GET,
+        req.headers as Record<string, string>,
+      );
 
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to get record via Python service',
-          );
-        }
+      handleConnectorResponse(
+        response,
+        res,
+        'Getting record by id',
+        'Record not found',
+      );
 
-        const result = response.data;
-
-        // Log successful retrieval
-        logger.info('Record retrieved successfully', {
-          userId,
-          orgId,
-          requestId: req.context?.requestId,
-        });
-
-        // Send response
-        res.status(200).json(result);
-      } catch (pythonServiceError: any) {
-        logger.error('Error calling Python service for record', {
-          userId,
-          orgId,
-          error: pythonServiceError.message,
-          response: pythonServiceError.response?.data,
-          requestId: req.context?.requestId,
-        });
-
-        // Handle different error types from Python service
-        if (pythonServiceError.response?.status === 403) {
-          throw new ForbiddenError(
-            'You do not have permission to access record',
-          );
-        } else if (pythonServiceError.response?.status === 404) {
-          throw new NotFoundError('No records found or user not found');
-        } else if (pythonServiceError.response?.status === 400) {
-          throw new BadRequestError(
-            pythonServiceError.response?.data?.reason ||
-              'Invalid request parameters',
-          );
-        } else {
-          throw new InternalServerError(
-            `Failed to get record: ${pythonServiceError.message}`,
-          );
-        }
-      }
+      // Log successful retrieval
+      logger.info('Record retrieved successfully');
     } catch (error: any) {
       logger.error('Error getting record by id', {
         recordId: req.params.recordId,
         error,
       });
-      next(error);
+      const handleError = handleBackendError(error, 'get record by id');
+      next(handleError);
       return; // Added return statement
     }
   };
@@ -1843,66 +1686,29 @@ export const reindexRecord =
         );
       }
 
-      try {
-        // Call the Python service to get record
-        const response = await axios.post(
-          `${appConfig.connectorBackend}/api/v1/records/${recordId}/reindex`,
-          {},
-          {
-            params: {
-              user_id: userId,
-              org_id: orgId,
-            },
-            headers: {
-              Authorization: req.headers.authorization,
-              'Content-Type': 'application/json',
-            },
-          },
-        );
+      // Call the Python service to get record
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/records/${recordId}/reindex`,
+        HttpMethod.POST,
+        req.headers as Record<string, string>,
+      );
 
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to get all records via Python service',
-          );
-        }
+      handleConnectorResponse(
+        response,
+        res,
+        'Record not found',
+        'Record not reindexed',
+      );
 
-        const result = response.data;
-
-        // Send response
-        res.status(200).json(result);
-      } catch (pythonServiceError: any) {
-        logger.error('Error calling Python service for reindex record', {
-          userId,
-          orgId,
-          error: pythonServiceError.message,
-          response: pythonServiceError.response?.data,
-          requestId: req.context?.requestId,
-        });
-
-        // Handle different error types from Python service
-        if (pythonServiceError.response?.status === 403) {
-          throw new ForbiddenError(
-            'You do not have permission to reindex this record',
-          );
-        } else if (pythonServiceError.response?.status === 404) {
-          throw new NotFoundError('No record found or user not found');
-        } else if (pythonServiceError.response?.status === 400) {
-          throw new BadRequestError(
-            pythonServiceError.response?.data?.reason ||
-              'Invalid request parameters',
-          );
-        } else {
-          throw new InternalServerError(
-            `Failed to reindex record: ${pythonServiceError.message}`,
-          );
-        }
-      }
+      // Log successful retrieval
+      logger.info('Record reindexed successfully');
     } catch (error: any) {
       logger.error('Error reindexing record', {
         recordId: req.params.recordId,
         error,
       });
-      next(error);
+      const handleError = handleBackendError(error, 'reindex record');
+      next(handleError);
       return; // Added return statement
     }
   };
@@ -1921,54 +1727,22 @@ export const deleteRecord =
         );
       }
 
-      try {
-        // Call the Python service to get record
-        const response = await axios.delete(
-          `${appConfig.connectorBackend}/api/v1/records/${recordId}`,
-          {
-            params: {
-              user_id: userId,
-            },
-          },
-        );
+      // Call the Python service to get record
+      const response = await executeConnectorCommand(
+        `${appConfig.connectorBackend}/api/v1/records/${recordId}`,
+        HttpMethod.DELETE,
+        req.headers as Record<string, string>,
+      );
 
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to delete record via Python service',
-          );
-        }
+      handleConnectorResponse(
+        response,
+        res,
+        'Deleting record',
+        'Record not deleted',
+      );
 
-        const result = response.data;
-
-        // Send response
-        res.status(200).json(result);
-      } catch (pythonServiceError: any) {
-        logger.error('Error calling Python service for deleting record', {
-          userId,
-          orgId,
-          error: pythonServiceError.message,
-          response: pythonServiceError.response?.data,
-          requestId: req.context?.requestId,
-        });
-
-        // Handle different error types from Python service
-        if (pythonServiceError.response?.status === 403) {
-          throw new ForbiddenError(
-            'You do not have permission to delete this record',
-          );
-        } else if (pythonServiceError.response?.status === 404) {
-          throw new NotFoundError('No record found or user not found');
-        } else if (pythonServiceError.response?.status === 400) {
-          throw new BadRequestError(
-            pythonServiceError.response?.data?.reason ||
-              'Invalid request parameters',
-          );
-        } else {
-          throw new InternalServerError(
-            `Failed to delete record: ${pythonServiceError.message}`,
-          );
-        }
-      }
+      // Log successful retrieval
+      logger.info('Record deleted successfully');
     } catch (error: any) {
       logger.error('Error deleting record', {
         recordId: req.params.recordId,
@@ -1990,37 +1764,37 @@ export const createKBPermission =
     next: NextFunction,
   ): Promise<void> => {
     try {
-      const { userId: requesterId } = req.user || {};
       const { kbId } = req.params;
       const { userIds, teamIds, role } = req.body;
 
-      if (!requesterId) {
-        throw new UnauthorizedError('User authentication required');
-      }
       if (userIds.length === 0 && teamIds.length === 0) {
         throw new BadRequestError('User IDs or team IDs are required');
       }
 
-      if (!role) {
-        throw new BadRequestError('Role is required');
+      // Role is required only if users are provided (teams don't need roles)
+      if (userIds.length > 0 && !role) {
+        throw new BadRequestError('Role is required when adding users');
       }
 
-      const validRoles = [
-        'OWNER',
-        'ORGANIZER',
-        'FILEORGANIZER',
-        'WRITER',
-        'COMMENTER',
-        'READER',
-      ];
-      if (!validRoles.includes(role)) {
-        throw new BadRequestError(
-          `Invalid role. Must be one of: ${validRoles.join(', ')}`,
-        );
+      // Validate role only if it's provided (for users)
+      if (role) {
+        const validRoles = [
+          'OWNER',
+          'ORGANIZER',
+          'FILEORGANIZER',
+          'WRITER',
+          'COMMENTER',
+          'READER',
+        ];
+        if (!validRoles.includes(role)) {
+          throw new BadRequestError(
+            `Invalid role. Must be one of: ${validRoles.join(', ')}`,
+          );
+        }
       }
 
       logger.info(
-        `Creating ${role} permissions for ${userIds.length} users and ${teamIds.length} teams on KB ${kbId}`,
+        `Creating ${role || 'team'} permissions for ${userIds.length} users and ${teamIds.length} teams on KB ${kbId}`,
         {
           userIds:
             userIds.length > 5
@@ -2030,41 +1804,38 @@ export const createKBPermission =
             teamIds.length > 5
               ? `${teamIds.slice(0, 5).join(', ')} and ${teamIds.length - 5} more`
               : teamIds.join(', '),
-          role,
-          requesterId,
+          role: role || 'N/A (team access)',
         },
       );
 
       try {
-        const response = await axios.post(
-          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/permissions`,
-          {
-            requesterId: requesterId,
-            userIds: userIds,
-            teamIds: teamIds,
-            role: role,
-          },
-        );
-
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to create permissions via Python service',
-          );
+        const payload: { userIds: string[]; teamIds: string[]; role?: string } = {
+          userIds: userIds,
+          teamIds: teamIds,
+        };
+        // Only include role if it's provided (for users)
+        if (role) {
+          payload.role = role;
         }
 
-        const permissionResult = response.data;
+        const response = await executeConnectorCommand(
+          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/permissions`,
+          HttpMethod.POST,
+          req.headers as Record<string, string>,
+          payload,
+        );
 
-        // if (!permissionResult.success) {
-        //   const statusCode = parseInt(permissionResult.code) || 500;
-        //   throw new HttpError(statusCode, permissionResult.reason || 'Failed to create permissions');
-        // }
+        if (response.statusCode !== 200) {
+          throw new InternalServerError('Failed to create permissions');
+        }
+
+        const permissionResult = response.data as any;
 
         logger.info('Permissions created successfully', {
           kbId,
           grantedCount: permissionResult.grantedCount,
           updatedCount: permissionResult.updatedCount,
-          role,
-          requesterId,
+          role: role || 'N/A (team access)',
         });
 
         res.status(201).json({
@@ -2124,13 +1895,8 @@ export const updateKBPermission =
     next: NextFunction,
   ): Promise<void> => {
     try {
-      const { userId: requesterId } = req.user || {};
       const { kbId } = req.params;
       const { userIds, teamIds, role } = req.body;
-
-      if (!requesterId) {
-        throw new UnauthorizedError('User authentication required');
-      }
 
       if (userIds.length === 0 && teamIds.length === 0) {
         throw new BadRequestError('User IDs or team IDs are required');
@@ -2159,35 +1925,28 @@ export const updateKBPermission =
       );
 
       try {
-        const response = await axios.put(
+        const response = await executeConnectorCommand(
           `${appConfig.connectorBackend}/api/v1/kb/${kbId}/permissions`,
+          HttpMethod.PUT,
+          req.headers as Record<string, string>,
           {
-            requesterId: requesterId,
             userIds: userIds,
             teamIds: teamIds,
             role: role,
           },
         );
 
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to update permission via Python service',
-          );
+        if (response.statusCode !== 200) {
+          throw new InternalServerError('Failed to update permission');
         }
 
-        const updateResult = response.data;
-
-        // if (!updateResult.success) {
-        //   const statusCode = parseInt(updateResult.code) || 500;
-        //   throw new HttpError(statusCode, updateResult.reason || 'Failed to update permission');
-        // }
+        const updateResult = response.data as any;
 
         logger.info('Permission updated successfully', {
           kbId,
           userIds: updateResult.userIds,
           teamIds: updateResult.teamIds,
           newRole: updateResult.newRole,
-          requesterId,
         });
 
         res.status(200).json({
@@ -2230,7 +1989,6 @@ export const updateKBPermission =
         userIds: req.body.userIds,
         teamIds: req.body.teamIds,
         error: error.message,
-        requesterId: req.user?.userId,
         requestId: req.context?.requestId,
       });
       const handleError = handleBackendError(error, 'update permissions');
@@ -2249,55 +2007,43 @@ export const removeKBPermission =
     next: NextFunction,
   ): Promise<void> => {
     try {
-      const { userId: requesterId } = req.user || {};
       const { kbId } = req.params;
       const { userIds, teamIds } = req.body;
-
-      if (!requesterId) {
-        throw new UnauthorizedError('User authentication required');
-      }
 
       if (userIds.length === 0 && teamIds.length === 0) {
         throw new BadRequestError('User IDs or team IDs are required');
       }
 
-      logger.info(`Removing permission for ${userIds.length} users and ${teamIds.length} teams from KB ${kbId}`);
+      logger.info(
+        `Removing permission for ${userIds.length} users and ${teamIds.length} teams from KB ${kbId}`,
+      );
 
       try {
-        const response = await axios.delete(
+        const response = await executeConnectorCommand(
           `${appConfig.connectorBackend}/api/v1/kb/${kbId}/permissions`,
+          HttpMethod.DELETE,
+          req.headers as Record<string, string>,
           {
-            data: {
-              requesterId: requesterId,
-              userIds: userIds,
-              teamIds: teamIds,
-            },
+            userIds: userIds,
+            teamIds: teamIds,
           },
         );
 
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to remove permission via Python service',
-          );
+        if (response.statusCode !== 200) {
+          throw new InternalServerError('Failed to remove permission');
         }
 
-        const removeResult = response.data;
-
-        // if (!removeResult.success) {
-        //   const statusCode = parseInt(removeResult.code) || 500;
-        //   throw new HttpError(statusCode, removeResult.reason || 'Failed to remove permission');
-        // }
+        const removeResult = response.data as any;
 
         logger.info('Permission removed successfully', {
           kbId,
           userIds: removeResult.userIds,
           teamIds: removeResult.teamIds,
-          requesterId,
         });
 
         res.status(200).json({
           kbId: kbId,
-            userIds: removeResult.userIds,
+          userIds: removeResult.userIds,
           teamIds: removeResult.teamIds,
         });
       } catch (pythonServiceError: any) {
@@ -2353,37 +2099,26 @@ export const listKBPermissions =
     next: NextFunction,
   ): Promise<void> => {
     try {
-      const { userId: requesterId } = req.user || {};
       const { kbId } = req.params;
-
-      if (!requesterId) {
-        throw new UnauthorizedError('User authentication required');
-      }
 
       logger.info(`Listing permissions for KB ${kbId}`);
 
       try {
-        const response = await axios.get(
-          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/requester/${requesterId}/permissions`,
+        const response = await executeConnectorCommand(
+          `${appConfig.connectorBackend}/api/v1/kb/${kbId}/permissions`,
+          HttpMethod.GET,
+          req.headers as Record<string, string>,
         );
 
-        if (response.status !== 200) {
-          throw new InternalServerError(
-            'Failed to list permissions via Python service',
-          );
+        if (response.statusCode !== 200) {
+          throw new InternalServerError('Failed to list permissions');
         }
 
-        const listResult = response.data;
-
-        // if (!listResult.success) {
-        //   const statusCode = parseInt(listResult.code) || 500;
-        //   throw new HttpError(statusCode, listResult.reason || 'Failed to list permissions');
-        // }
+        const listResult = response.data as any;
 
         logger.info('Permissions listed successfully', {
           kbId,
           totalCount: listResult.totalCount,
-          requesterId,
         });
 
         res.status(200).json({
@@ -2434,19 +2169,24 @@ export const getConnectorStats =
         );
       }
 
+      if (!req.params.connector) {
+        throw new BadRequestError('Connector is required');
+      }
+
       try {
         // Call the Python service to get record
-        const response = await axios.get(
-          `${appConfig.connectorBackend}/api/v1/stats`,
-          {
-            params: {
-              org_id: orgId,
-              connector: req.params.connector,
-            },
-          },
+
+        const queryParams = new URLSearchParams();
+
+        queryParams.append('org_id', orgId);
+        queryParams.append('connector', req.params.connector);
+        const response = await executeConnectorCommand(
+          `${appConfig.connectorBackend}/api/v1/stats?${queryParams.toString()}`,
+          HttpMethod.GET,
+          req.headers as Record<string, string>,
         );
 
-        if (response.status !== 200) {
+        if (response.statusCode !== 200) {
           throw new InternalServerError(
             'Failed to get connector stats via Python service',
           );
@@ -2510,14 +2250,20 @@ export const getRecordBuffer =
     try {
       const { recordId } = req.params as { recordId: string };
       const { userId, orgId } = req.user || {};
-
+      const { convertTo } = req.query as { convertTo: string };
       if (!userId || !orgId) {
         throw new BadRequestError('User authentication is required');
       }
 
+      const queryParams = new URLSearchParams();
+      if (convertTo) {
+        logger.info('Converting file to ', { convertTo });
+        queryParams.append('convertTo', convertTo);
+      }
+
       // Make request to FastAPI backend
       const response = await axios.get(
-        `${connectorUrl}/api/v1/stream/record/${recordId}`,
+        `${connectorUrl}/api/v1/stream/record/${recordId}?${queryParams.toString()}`,
         {
           responseType: 'stream',
           headers: {
@@ -2529,7 +2275,9 @@ export const getRecordBuffer =
       );
 
       // Set appropriate headers from the FastAPI response
-      res.set('Content-Type', response.headers['content-type']);
+      if (response.headers['content-type']) {
+        res.set('Content-Type', response.headers['content-type']);
+      }
       if (response.headers['content-disposition']) {
         res.set('Content-Disposition', response.headers['content-disposition']);
       }
@@ -2542,7 +2290,13 @@ export const getRecordBuffer =
         console.error('Stream error:', error);
         // Only send error if headers haven't been sent yet
         if (!res.headersSent) {
-          throw new InternalServerError('Error streaming data');
+          try {
+            res.status(500).end('Error streaming data');
+          } catch (e) {
+            logger.error('Failed to send stream error response to client', {
+              error: e,
+            });
+          }
         }
       });
     } catch (error: any) {
@@ -2554,15 +2308,21 @@ export const getRecordBuffer =
             error: error.response.data || 'Error from AI backend',
           });
         } else {
-          throw new InternalServerError('Failed to retrieve record data');
+          // Don't throw here to avoid uncaughtException shutdown during streams
+          res.status(500).json({ error: 'Failed to retrieve record data' });
+          return;
         }
       }
-      next(error);
+      const handleError = handleBackendError(error, 'get record buffer');
+      logger.error('Error fetching record buffer', {
+        error: error.message,
+      });
+      next(handleError);
     }
   };
 
 export const reindexAllRecords =
-  (recordRelationService: RecordRelationService) =>
+  (recordRelationService: RecordRelationService, appConfig: AppConfig) =>
   async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
     try {
       const userId = req.user?.userId;
@@ -2572,15 +2332,16 @@ export const reindexAllRecords =
         throw new BadRequestError('User not authenticated');
       }
 
-      const allowedApps = ['ONEDRIVE', 'DRIVE', 'GMAIL', 'CONFLUENCE', 'SLACK', 'SHAREPOINT ONLINE', 'JIRA'];
-      if (!allowedApps.includes(app)) {
-        throw new BadRequestError('APP not allowed');
-      }
+      await validateActiveConnector(
+        app,
+        appConfig,
+        req.headers as Record<string, string>,
+      );
 
       const reindexPayload = {
         userId,
         orgId,
-        app,
+        app: normalizeAppName(app),
       };
 
       const reindexResponse =
@@ -2601,7 +2362,7 @@ export const reindexAllRecords =
   };
 
 export const resyncConnectorRecords =
-  (recordRelationService: RecordRelationService) =>
+  (recordRelationService: RecordRelationService, appConfig: AppConfig) =>
   async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
     try {
       const userId = req.user?.userId;
@@ -2611,23 +2372,16 @@ export const resyncConnectorRecords =
         throw new BadRequestError('User not authenticated');
       }
 
-      const allowedConnectors = [
-        'ONEDRIVE',
-        'DRIVE',
-        'GMAIL',
-        'CONFLUENCE',
-        'JIRA',
-        'SLACK',
-        'SHAREPOINT ONLINE',
-      ];
-      if (!allowedConnectors.includes(connectorName)) {
-        throw new BadRequestError(`Connector ${connectorName} not allowed`);
-      }
+      await validateActiveConnector(
+        connectorName,
+        appConfig,
+        req.headers as Record<string, string>,
+      );
 
       const resyncConnectorPayload = {
         userId,
         orgId,
-        connectorName,
+        connectorName: normalizeAppName(connectorName),
       };
 
       const resyncConnectorResponse =

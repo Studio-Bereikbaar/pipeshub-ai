@@ -11,13 +11,13 @@ from app.config.constants.service import (
     TokenScopes,
     config_node_constants,
 )
-from app.core.ai_arango_service import ArangoService
+from app.connectors.services.base_arango_service import BaseArangoService
 from app.modules.transformers.transformer import TransformContext, Transformer
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 
 class BlobStorage(Transformer):
-    def __init__(self,logger,config_service, arango_service: ArangoService = None) -> None:
+    def __init__(self,logger,config_service, arango_service: BaseArangoService = None) -> None:
         self.logger = logger
         self.config_service = config_service
         self.arango_service = arango_service
@@ -27,7 +27,7 @@ class BlobStorage(Transformer):
         org_id = record.org_id
         record_id = record.id
         virtual_record_id = record.virtual_record_id
-        record_dict = record.model_dump()
+        record_dict = record.model_dump(mode='json')
         document_id = await self.save_record_to_storage(org_id, record_id, virtual_record_id, record_dict)
 
         # Store the mapping if we have both IDs and arango_service is available
@@ -288,8 +288,12 @@ class BlobStorage(Transformer):
 
         try:
             collection_name = CollectionNames.VIRTUAL_RECORD_TO_DOC_ID_MAPPING.value
-            query = f'FOR doc IN {collection_name} FILTER doc.virtualRecordId == "{virtual_record_id}" RETURN doc.documentId'
-            cursor = self.arango_service.db.aql.execute(query)
+            query = 'FOR doc IN @@collection FILTER doc.virtualRecordId == @virtualRecordId OR doc._key == @virtualRecordId RETURN doc.documentId'
+            bind_vars = {
+                '@collection': collection_name,
+                'virtualRecordId': virtual_record_id
+            }
+            cursor = self.arango_service.db.aql.execute(query, bind_vars=bind_vars)
 
             # Check if cursor has any results before calling next()
             results = list(cursor)
@@ -348,8 +352,8 @@ class BlobStorage(Transformer):
                             data = await resp.json()
                             if(data.get("signedUrl")):
                                 signed_url = data.get("signedUrl")
-                                async with aiohttp.ClientSession() as session:
-                                    async with session.get(signed_url, headers=headers) as resp:
+                                # Reuse the same session for signed URL fetch
+                                async with session.get(signed_url, headers=headers) as resp:
                                         if resp.status == HttpStatusCode.OK.value:
                                             data = await resp.json()
                             self.logger.info("✅ Successfully retrieved record for virtual_record_id from blob storage: %s", virtual_record_id)
@@ -373,13 +377,12 @@ class BlobStorage(Transformer):
             collection_name = CollectionNames.VIRTUAL_RECORD_TO_DOC_ID_MAPPING.value
 
             # Create a unique key for the mapping using both IDs
-            mapping_key = f"{virtual_record_id}_{document_id}"
+            mapping_key = virtual_record_id
 
             mapping_document = {
                 "_key": mapping_key,
-                "virtualRecordId": virtual_record_id,
                 "documentId": document_id,
-                "createdAt": get_epoch_timestamp_in_ms()
+                "updatedAt": get_epoch_timestamp_in_ms()
             }
 
             success = await self.arango_service.batch_upsert_nodes(
@@ -400,58 +403,3 @@ class BlobStorage(Transformer):
             raise e
 
 
-# async def store_virtual_record_mapping_standalone(
-#     arango_service: ArangoService,
-#     virtual_record_id: str,
-#     document_id: str,
-#     logger=None
-# ) -> bool:
-#     """
-#     Standalone function to store the mapping between virtual_record_id and document_id in ArangoDB.
-
-#     Args:
-#         arango_service (ArangoService): The ArangoDB service instance
-#         virtual_record_id (str): The virtual record ID
-#         document_id (str): The document ID from blob storage
-#         logger: Optional logger instance for logging
-
-#     Returns:
-#         bool: True if successful, False otherwise.
-#     """
-#     if not arango_service:
-#         if logger:
-#             logger.warning("ArangoService not provided, cannot store virtual record mapping.")
-#         return False
-
-#     try:
-#         collection_name = CollectionNames.VIRTUAL_RECORD_TO_DOC_ID_MAPPING.value
-
-#         # Create a unique key for the mapping using both IDs
-#         mapping_key = f"{virtual_record_id}_{document_id}"
-
-#         mapping_document = {
-#             "_key": mapping_key,
-#             "virtualRecordId": virtual_record_id,
-#             "documentId": document_id,
-#             "createdAt": get_epoch_timestamp_in_ms()
-#         }
-
-#         success = await arango_service.batch_upsert_nodes(
-#             [mapping_document],
-#             collection_name
-#         )
-
-#         if success:
-#             if logger:
-#                 logger.info("✅ Successfully stored virtual record mapping: virtual_record_id=%s, document_id=%s", virtual_record_id, document_id)
-#             return True
-#         else:
-#             if logger:
-#                 logger.error("❌ Failed to store virtual record mapping")
-#             return False
-
-#     except Exception as e:
-#         if logger:
-#             logger.error("❌ Failed to store virtual record mapping: %s", str(e))
-#             logger.exception("Detailed error trace:")
-#         return False

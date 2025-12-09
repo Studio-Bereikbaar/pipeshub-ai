@@ -431,7 +431,7 @@ export const normalizeAppName = (appName: string): string => {
 };
 
 // Helper function to get app memory icon
-export const getAppMemoryIcon = (appName: string) => {
+export const getAppKnowledgeIcon = (appName: string) => {
   const iconMap: Record<string, any> = {
     SLACK: chatIcon,
     GMAIL: emailIcon,
@@ -462,7 +462,7 @@ export const extractAgentConfigFromFlow = (
   currentAgent?: Agent | null
 ) => {
   const tools: string[] = [];
-  const models: { provider: string; modelName: string }[] = [];
+  const models: { provider: string; modelName: string; isReasoning: boolean, modelKey: string }[] = [];
   const kb: string[] = [];
   const apps: string[] = [];
 
@@ -486,22 +486,24 @@ export const extractAgentConfigFromFlow = (
       models.push({
         provider: node.data.config.provider || 'azureOpenAI',
         modelName: node.data.config.modelName || node.data.config.model,
+        isReasoning: node.data.config.isReasoning || false,
+        modelKey: node.data.config.modelKey || '',
       });
     } else if (node.data.type.startsWith('kb-') && node.data.type !== 'kb-group') {
       // Individual knowledge base nodes
       kb.push(node.data.config.kbId);
-    } else if (node.data.type.startsWith('app-memory-') && node.data.type !== 'app-memory-group') {
-      // Individual app memory nodes
+    } else if (node.data.type.startsWith('app-') && node.data.type !== 'app-group') {
+      // Individual app knowledge nodes (not group node)
       if (node.data.config?.appName && !apps.includes(node.data.config.appName)) {
         apps.push(node.data.config.appName);
       }
     }
   });
 
-  // Handle app-memory-group and kb-group nodes
-  const appMemoryGroupNode = nodes.find((node) => node.data.type === 'app-memory-group');
-  if (appMemoryGroupNode && appMemoryGroupNode.data.config?.selectedApps) {
-    appMemoryGroupNode.data.config.selectedApps.forEach((app: string) => {
+  // Handle app-group and kb-group nodes
+  const appKnowledgeGroupNode = nodes.find((node) => node.data.type === 'app-group');
+  if (appKnowledgeGroupNode && appKnowledgeGroupNode.data.config?.selectedApps) {
+    appKnowledgeGroupNode.data.config.selectedApps.forEach((app: string) => {
       if (!apps.includes(app)) {
         apps.push(app);
       }
@@ -518,7 +520,6 @@ export const extractAgentConfigFromFlow = (
   }
 
   const agentCoreNode = nodes.find((node) => node.data.type === 'agent-core');
-
   return {
     name: agentName,
     description:

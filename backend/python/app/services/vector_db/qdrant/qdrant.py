@@ -1,9 +1,12 @@
-from typing import Dict, List, Optional, Union
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple, Union
 
 from qdrant_client import AsyncQdrantClient, QdrantClient  # type: ignore
 from qdrant_client.http.models import (  # type: ignore
     Distance,
     Filter,  # type: ignore
+    FilterSelector,
     KeywordIndexParams,
     KeywordIndexType,
     Modifier,
@@ -90,7 +93,15 @@ class QdrantService(IVectorDBService):
                 api_key=qdrant_config.get("apiKey"), # type: ignore
                 prefer_grpc=True,
                 https=False,
-                timeout=180,
+                timeout=300,  # Increased timeout for large batches
+                grpc_options={
+                    'grpc.max_send_message_length': 64 * 1024 * 1024,  # 64MB
+                    'grpc.max_receive_message_length': 64 * 1024 * 1024,  # 64MB
+                    'grpc.keepalive_time_ms': 30000,
+                    'grpc.keepalive_timeout_ms': 10000,
+                    'grpc.http2.max_pings_without_data': 0,
+                    'grpc.keepalive_permit_without_calls': 1,
+                },
             )
             logger.info("✅ Connected to Qdrant with async client successfully")
         except Exception as e:
@@ -119,7 +130,15 @@ class QdrantService(IVectorDBService):
                 api_key=qdrant_config.get("apiKey"), # type: ignore
                 prefer_grpc=True,
                 https=False,
-                timeout=180,
+                timeout=300,  # Increased timeout for large batches
+                grpc_options={
+                    'grpc.max_send_message_length': 64 * 1024 * 1024,  # 64MB
+                    'grpc.max_receive_message_length': 64 * 1024 * 1024,  # 64MB
+                    'grpc.keepalive_time_ms': 30000,
+                    'grpc.keepalive_timeout_ms': 10000,
+                    'grpc.http2.max_pings_without_data': 0,
+                    'grpc.keepalive_permit_without_calls': 1,
+                },
             )
             logger.info("✅ Connected to Qdrant successfully")
         except Exception as e:
@@ -196,7 +215,10 @@ class QdrantService(IVectorDBService):
             }
 
         if optimizers_config is None:
-            optimizers_config = OptimizersConfigDiff(default_segment_number=8)
+            # Note: indexing_threshold and memmap_threshold are set globally in docker-compose
+            optimizers_config = OptimizersConfigDiff(
+                default_segment_number=8,
+            )
 
         if quantization_config is None:
             quantization_config = ScalarQuantization(
@@ -221,7 +243,6 @@ class QdrantService(IVectorDBService):
         collection_name: str,
         field_name: str,
         field_schema: dict,
-        index_type: str = "persistent",
     ) -> None:
         """Create an index"""
         if self.client is None:
@@ -374,8 +395,76 @@ class QdrantService(IVectorDBService):
         self,
         collection_name: str,
         points: List[PointStruct],
+        batch_size: int = 1000,  # Optimal batch size for Qdrant
+        max_workers: int = 5,  # Number of parallel upload threads
     ) -> None:
-        """Upsert points"""
+        """Upsert points with parallel batching for better performance"""
         if self.client is None:
             raise RuntimeError("Client not connected. Call connect() first.")
-        self.client.upsert(collection_name, points)
+
+        start_time = time.perf_counter()
+        total_points = len(points)
+        logger.info(f"⏱️ Starting upsert of {total_points} points to collection '{collection_name}' (batch size: {batch_size}, parallel workers: {max_workers})")
+
+        # If points fit in one batch, upload directly
+        if total_points <= batch_size:
+            self.client.upsert(collection_name, points)
+        else:
+            # Split into batches
+            batches = []
+            for i in range(0, total_points, batch_size):
+                batch_end = min(i + batch_size, total_points)
+                batch = points[i:batch_end]
+                batch_num = (i // batch_size) + 1
+                batches.append((batch_num, batch))
+
+            total_batches = len(batches)
+            completed_batches = 0
+
+            # Upload batches in parallel using ThreadPoolExecutor
+            def upload_batch(batch_info: Tuple[int, List[PointStruct]]) -> Tuple[int, int, float]:
+                batch_num, batch = batch_info
+                batch_start = time.perf_counter()
+                self.client.upsert(collection_name, batch)
+                batch_elapsed = time.perf_counter() - batch_start
+                return batch_num, len(batch), batch_elapsed
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(upload_batch, batch_info): batch_info for batch_info in batches}
+
+                for future in as_completed(futures):
+                    try:
+                        batch_num, batch_size_actual, batch_elapsed = future.result()
+                        completed_batches += 1
+                        logger.info(
+                            f"📦 Uploaded batch {batch_num}/{total_batches}: {batch_size_actual} points "
+                            f"in {batch_elapsed:.2f}s ({batch_size_actual/batch_elapsed:.1f} points/s) "
+                            f"[{completed_batches}/{total_batches} complete]"
+                        )
+                    except Exception as e:
+                        batch_info = futures[future]
+                        logger.error(f"❌ Failed to upload batch {batch_info[0]}: {str(e)}")
+                        raise
+
+        elapsed_time = time.perf_counter() - start_time
+        throughput = total_points / elapsed_time if elapsed_time > 0 else 0
+        logger.info(
+            f"✅ Completed upsert of {total_points} points in {elapsed_time:.2f}s "
+            f"(throughput: {throughput:.1f} points/s, avg: {elapsed_time/total_points*1000:.2f}ms per point)"
+        )
+
+    def delete_points(
+        self,
+        collection_name: str,
+        filter: Filter,
+    ) -> None:
+        """Delete points"""
+        if self.client is None:
+            raise RuntimeError("Client not connected. Call connect() first.")
+        self.client.delete(
+            collection_name=collection_name,
+            points_selector=FilterSelector(
+                filter=filter
+            ),
+        )
+        logger.info(f"✅ Deleted points from collection '{collection_name}'")

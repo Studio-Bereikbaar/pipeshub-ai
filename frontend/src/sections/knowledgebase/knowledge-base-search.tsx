@@ -22,10 +22,13 @@ import { useConnectors } from '../accountdetails/connectors/context';
 
 import type { Filters } from './types/knowledge-base';
 import type { PipesHub, SearchResult, AggregatedDocument } from './types/search-response';
+import ImageHighlighter from '../qna/chatbot/components/image-highlighter';
 
 // Constants for sidebar widths - must match with the sidebar component
 const SIDEBAR_EXPANDED_WIDTH = 320;
 const SIDEBAR_COLLAPSED_WIDTH = 64;
+const INITIAL_TOP_K = 10;
+const MAX_TOP_K = 100;
 
 // Styled Close Button for the citation viewer
 export const StyledCloseButton = styled(Button)(({ theme }) => ({
@@ -55,28 +58,31 @@ function getDocumentType(extension: string) {
   if (extension === 'html') return 'html';
   if (extension === 'txt') return 'text';
   if (extension === 'md') return 'md';
+  if (extension === 'mdx') return 'mdx';
+  if (['jpg', 'jpeg', 'png', 'webp', 'svg'].includes(extension)) return 'image';
   return 'other';
 }
 
 export default function KnowledgeBaseSearch() {
   const theme = useTheme();
-  // Make sure the filters state has app property instead of connector
   const [filters, setFilters] = useState<Filters>({
     department: [],
     moduleId: [],
     appSpecificRecordType: [],
-    app: [], // Updated to use app instead of connector
-    kb:[] 
+    app: [],
+    kb: [] 
   });
   const scrollableStyles = createScrollableContainerStyle(theme);
 
   // Get connector data from the hook at parent level for optimal performance
   const { activeConnectors, inactiveConnectors } = useConnectors();
   const allConnectors = [...activeConnectors, ...inactiveConnectors];
+  
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [topK, setTopK] = useState<number>(10);
+  const [topK, setTopK] = useState<number>(INITIAL_TOP_K);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
+  const [canLoadMore, setCanLoadMore] = useState<boolean>(true);
   const [aggregatedCitations, setAggregatedCitations] = useState<AggregatedDocument[]>([]);
   const [openSidebar, setOpenSidebar] = useState<boolean>(true);
   const [isPdf, setIsPdf] = useState<boolean>(false);
@@ -85,12 +91,14 @@ export default function KnowledgeBaseSearch() {
   const [isHtml, setIsHtml] = useState<boolean>(false);
   const [isMarkdown, setIsMarkdown] = useState<boolean>(false);
   const [isTextFile, setIsTextFile] = useState<boolean>(false);
+  const [isImage, setIsImage] = useState<boolean>(false);
   const [fileUrl, setFileUrl] = useState<string>('');
   const [recordCitations, setRecordCitations] = useState<AggregatedDocument | null>(null);
   const [hasSearched, setHasSearched] = useState<boolean>(false);
   const [recordsMap, setRecordsMap] = useState<Record<string, PipesHub.Record>>({});
   const [fileBuffer, setFileBuffer] = useState<ArrayBuffer | null>(null);
   const [highlightedCitation, setHighlightedCitation] = useState<SearchResult | null>();
+  
   // Prevent rapid filter changes
   const isFilterChanging = useRef(false);
 
@@ -102,7 +110,7 @@ export default function KnowledgeBaseSearch() {
   });
 
   // Add a state to track if citation viewer is open
-  const isCitationViewerOpen = isPdf || isExcel || isDocx || isHtml || isTextFile || isMarkdown;
+  const isCitationViewerOpen = isPdf || isExcel || isDocx || isHtml || isTextFile || isMarkdown || isImage;
 
   const handleFilterChange = (newFilters: Filters) => {
     // If a filter operation is already in progress, return
@@ -112,7 +120,6 @@ export default function KnowledgeBaseSearch() {
 
     // Use requestAnimationFrame to batch updates
     requestAnimationFrame(() => {
-      // Use setter with callback to prevent potential stale state issues
       setFilters((prevFilters) => ({
         ...prevFilters,
         ...newFilters,
@@ -127,12 +134,10 @@ export default function KnowledgeBaseSearch() {
 
   const aggregateCitationsByRecordId = useCallback(
     (documents: SearchResult[]): AggregatedDocument[] => {
-      // Create a map to store aggregated documents
       const aggregationMap = documents.reduce(
         (acc, doc) => {
           const recordId = doc.metadata?.recordId || 'unknown';
 
-          // If this recordId doesn't exist in the accumulator, create a new entry
           if (!acc[recordId]) {
             acc[recordId] = {
               recordId,
@@ -140,15 +145,12 @@ export default function KnowledgeBaseSearch() {
             };
           }
 
-          // Add current document to the group
           acc[recordId].documents.push(doc);
-
           return acc;
         },
         {} as Record<string, AggregatedDocument>
       );
 
-      // Convert the aggregation map to an array
       return Object.values(aggregationMap);
     },
     []
@@ -158,17 +160,12 @@ export default function KnowledgeBaseSearch() {
     (records: PipesHub.Record[]): Record<string, PipesHub.Record> =>
       records.reduce(
         (acc, record) => {
-          // Use _key as the lookup key
           const recordKey = record._key || 'unknown';
-
-          // Store the record in the accumulator with its _key as the key
           acc[recordKey] = record;
-
           return acc;
         },
         {} as Record<string, PipesHub.Record>
       ),
-
     []
   );
 
@@ -177,6 +174,7 @@ export default function KnowledgeBaseSearch() {
     if (!searchQuery.trim()) {
       setSearchResults([]);
       setAggregatedCitations([]);
+      setCanLoadMore(false);
       return;
     }
 
@@ -186,30 +184,29 @@ export default function KnowledgeBaseSearch() {
     try {
       const data = await KnowledgeBaseAPI.searchKnowledgeBases(searchQuery, topK, filters);
 
-      // Extract search results from the response
       const results = data.searchResults || [];
       const recordResult = data.records || [];
+      
       setSearchResults(results);
+
+      // Check if we can load more: if results length is less than topK, no more results available
+      const shouldLoadMore = results.length >= topK && topK < MAX_TOP_K;
+      setCanLoadMore(shouldLoadMore);
 
       const recordsLookupMap = aggregateRecordsByRecordId(recordResult);
       setRecordsMap(recordsLookupMap);
-      // Ensure we have a safe way to aggregate citations
+      
       const citations = aggregateCitationsByRecordId(results);
       setAggregatedCitations(citations);
     } catch (error) {
       console.error('Search failed:', error);
       setSearchResults([]);
       setAggregatedCitations([]);
-      // setSnackbar({
-      //   open: true,
-      //   message: 'Failed to search knowledge base. Please try again.',
-      //   severity: 'error',
-      // });
+      setCanLoadMore(false);
     } finally {
       setLoading(false);
     }
-    // eslint-disable-next-line
-  }, [searchQuery, topK, filters, aggregateCitationsByRecordId]);
+  }, [searchQuery, topK, filters, aggregateCitationsByRecordId, aggregateRecordsByRecordId]);
 
   useEffect(() => {
     // Only trigger search if there's a non-empty query
@@ -220,19 +217,30 @@ export default function KnowledgeBaseSearch() {
 
   const handleSearchQueryChange = (query: string): void => {
     setSearchQuery(query);
+    
+    // Reset topK and canLoadMore when query changes
+    if (query.trim() !== searchQuery.trim()) {
+      setTopK(INITIAL_TOP_K);
+      setCanLoadMore(true);
+    }
+    
     if (!query.trim()) {
       setHasSearched(false);
+      setCanLoadMore(false);
     }
   };
 
   const handleTopKChange = (callback: (prevTopK: number) => number): void => {
-    setTopK(callback);
+    setTopK((prevTopK) => {
+      const newTopK = callback(prevTopK);
+      // Don't exceed MAX_TOP_K
+      return newTopK <= MAX_TOP_K ? newTopK : prevTopK;
+    });
   };
 
   const handleLargePPTFile = (record: any) => {
     if (record.sizeInBytes / 1048576 > 5) {
-      console.log('PPT with large file size');
-      throw new Error('Large fize size, redirecting to web page ');
+      throw new Error('Large file size, redirecting to web page');
     }
   };
 
@@ -241,8 +249,6 @@ export default function KnowledgeBaseSearch() {
     extension: string,
     recordCitation?: SearchResult
   ): Promise<void> => {
-    // Reset view states;
-
     // Reset all document type states
     setIsPdf(false);
     setIsExcel(false);
@@ -250,10 +256,12 @@ export default function KnowledgeBaseSearch() {
     setIsHtml(false);
     setIsTextFile(false);
     setIsMarkdown(false);
+    setIsImage(false);
     setFileBuffer(null);
     setRecordCitations(null);
     setFileUrl('');
     setHighlightedCitation(recordCitation);
+    
     const documentContainer = document.querySelector('#document-container');
     if (documentContainer) {
       documentContainer.innerHTML = '';
@@ -263,10 +271,8 @@ export default function KnowledgeBaseSearch() {
     setOpenSidebar(false);
 
     try {
-      // Get the record ID from parameter or fallback
       const record = recordsMap[recordId];
 
-      // If record doesn't exist, use fallback or show error
       if (!record) {
         console.error('Record not found for ID:', recordId);
         setSnackbar({
@@ -276,6 +282,7 @@ export default function KnowledgeBaseSearch() {
         });
         return;
       }
+      
       // Find the correct citation from the aggregated data
       const citation = aggregatedCitations.find((item) => item.recordId === recordId);
       if (citation) {
@@ -301,7 +308,6 @@ export default function KnowledgeBaseSearch() {
             responseType: 'blob',
           });
 
-          // Read the blob response as text to check if it's JSON with signedUrl
           const reader = new FileReader();
           const textPromise = new Promise<string>((resolve) => {
             reader.onload = () => {
@@ -312,24 +318,40 @@ export default function KnowledgeBaseSearch() {
           reader.readAsText(response.data);
           const text = await textPromise;
 
-          let filename = record.recordName || `document-${record.recordId}`;
+          let filename;
           const contentDisposition = response.headers['content-disposition'];
+
           if (contentDisposition) {
-            const filenameMatch = contentDisposition.match(/filename="?([^"]*)"?/);
-            if (filenameMatch && filenameMatch[1]) {
-              filename = filenameMatch[1];
+            // First try to parse filename*=UTF-8'' format (RFC 5987) for Unicode support
+            const filenameStarMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+            if (filenameStarMatch && filenameStarMatch[1]) {
+              // Decode the percent-encoded UTF-8 filename
+              try {
+                filename = decodeURIComponent(filenameStarMatch[1]);
+              } catch (e) {
+                console.error('Failed to decode UTF-8 filename', e);
+              }
             }
+            
+            // Fallback to basic filename="..." format if filename* not found
+            if (!filename) {
+              const filenameMatch = contentDisposition.match(/filename="?([^";\n]*)"?/i);
+              if (filenameMatch && filenameMatch[1]) {
+                filename = filenameMatch[1];
+              }
+            }
+          }
+          if (!filename && record.recordName) {
+            filename = record.recordName;
           }
 
           try {
-            // Try to parse as JSON to check for signedUrl property
             const jsonData = JSON.parse(text);
             if (jsonData && jsonData.signedUrl) {
               setFileUrl(jsonData.signedUrl);
               fileDataLoaded = true;
             }
           } catch (e) {
-            // Case 2: Local storage - Return buffer
             const bufferReader = new FileReader();
             const arrayBufferPromise = new Promise<ArrayBuffer>((resolve) => {
               bufferReader.onload = () => {
@@ -349,28 +371,26 @@ export default function KnowledgeBaseSearch() {
         } catch (error) {
           setSnackbar({
             open: true,
-            // Provide a clear message about what's happening
             message: 'Failed to load preview. Redirecting to the original document shortly...',
-            severity: 'info', // Use 'info' or 'warning' for redirection notice
+            severity: 'info',
           });
-          let webUrl = record?.webUrl || record?.webUrl;
+          
+          let webUrl = record?.webUrl;
 
-          // Keep the URL fix logic (though less likely needed for non-UPLOAD here, better safe)
           if (record.origin === 'UPLOAD' && webUrl && !webUrl.startsWith('http')) {
             const baseUrl = `${window.location.protocol}//${window.location.host}`;
             webUrl = baseUrl + webUrl;
           }
+          
           setTimeout(() => {
             if (webUrl) {
               try {
                 window.open(webUrl, '_blank', 'noopener,noreferrer');
-                console.log('Opened document in new tab');
               } catch (openError) {
                 console.error('Error opening new tab:', openError);
                 setSnackbar({
                   open: true,
-                  message:
-                    'Failed to automatically open the document. Please check your browser pop-up settings.',
+                  message: 'Failed to automatically open the document. Please check your browser pop-up settings.',
                   severity: 'error',
                 });
               }
@@ -390,12 +410,14 @@ export default function KnowledgeBaseSearch() {
           let params = {};
           if (['pptx', 'ppt'].includes(record?.extension)) {
             params = {
-              convertTo: 'pdf',
+              convertTo: 'application/pdf',
             };
             handleLargePPTFile(record);
           }
+          
           const publicConnectorUrlResponse = await getConnectorPublicUrl();
           let response;
+          
           if (publicConnectorUrlResponse && publicConnectorUrlResponse.url) {
             const CONNECTOR_URL = publicConnectorUrlResponse.url;
             response = await axios.get(`${CONNECTOR_URL}/api/v1/stream/record/${recordId}`, {
@@ -411,23 +433,40 @@ export default function KnowledgeBaseSearch() {
               }
             );
           }
+          
           if (!response) return;
 
-          // Extract filename from content-disposition header
-          let filename = record.recordName || `document-${recordId}`;
+          let filename;
           const contentDisposition = response.headers['content-disposition'];
+
           if (contentDisposition) {
-            const filenameMatch = contentDisposition.match(/filename="?([^"]*)"?/);
-            if (filenameMatch && filenameMatch[1]) {
-              filename = filenameMatch[1];
+            // First try to parse filename*=UTF-8'' format (RFC 5987) for Unicode support
+            const filenameStarMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+            if (filenameStarMatch && filenameStarMatch[1]) {
+              // Decode the percent-encoded UTF-8 filename
+              try {
+                filename = decodeURIComponent(filenameStarMatch[1]);
+              } catch (e) {
+                console.error('Failed to decode UTF-8 filename', e);
+              }
+            }
+            
+            // Fallback to basic filename="..." format if filename* not found
+            if (!filename) {
+              const filenameMatch = contentDisposition.match(/filename="?([^";\n]*)"?/i);
+              if (filenameMatch && filenameMatch[1]) {
+                filename = filenameMatch[1];
+              }
             }
           }
 
-          // Convert blob directly to ArrayBuffer
+          if(!filename && record.recordName) {
+            filename = record.recordName;
+          }
+
           const bufferReader = new FileReader();
           const arrayBufferPromise = new Promise<ArrayBuffer>((resolve, reject) => {
             bufferReader.onload = () => {
-              // Create a copy of the buffer to prevent detachment issues
               const originalBuffer = bufferReader.result as ArrayBuffer;
               const bufferCopy = originalBuffer.slice(0);
               resolve(bufferCopy);
@@ -449,30 +488,26 @@ export default function KnowledgeBaseSearch() {
           console.error('Error downloading document:', err);
           setSnackbar({
             open: true,
-            // Provide a clear message about what's happening
             message: 'Failed to load preview. Redirecting to the original document shortly...',
-            severity: 'info', // Use 'info' or 'warning' for redirection notice
+            severity: 'info',
           });
-          let webUrl = record?.webUrl || record?.webUrl;
-          // Keep the URL fix logic (though less likely needed for non-UPLOAD here, better safe)
+          
+          let webUrl = record?.webUrl;
+          
           if (record.origin === 'UPLOAD' && webUrl && !webUrl.startsWith('http')) {
             const baseUrl = `${window.location.protocol}//${window.location.host}`;
             webUrl = baseUrl + webUrl;
           }
 
-          console.log(`Attempting to redirect to webUrl: ${webUrl}`);
-
           setTimeout(() => {
             if (webUrl) {
               try {
                 window.open(webUrl, '_blank', 'noopener,noreferrer');
-                console.log('Opened document in new tab');
               } catch (openError) {
                 console.error('Error opening new tab:', openError);
                 setSnackbar({
                   open: true,
-                  message:
-                    'Failed to automatically open the document. Please check your browser pop-up settings.',
+                  message: 'Failed to automatically open the document. Please check your browser pop-up settings.',
                   severity: 'error',
                 });
               }
@@ -493,7 +528,6 @@ export default function KnowledgeBaseSearch() {
       // Only set the document type if file data was successfully loaded
       if (fileDataLoaded) {
         const documentType = getDocumentType(extension);
-        // Set only the relevant state based on document type
         switch (documentType) {
           case 'pdf':
             setIsPdf(true);
@@ -511,7 +545,11 @@ export default function KnowledgeBaseSearch() {
             setIsTextFile(true);
             break;
           case 'md':
+          case 'mdx':
             setIsMarkdown(true);
+            break;
+          case 'image':
+            setIsImage(true);
             break;
           default:
             setSnackbar({
@@ -529,11 +567,6 @@ export default function KnowledgeBaseSearch() {
       }
     } catch (error) {
       console.error('Error fetching document:', error);
-      // setSnackbar({
-      //   open: true,
-      //   message: `Error fetching document: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      //   severity: 'error',
-      // });
     }
   };
 
@@ -548,6 +581,7 @@ export default function KnowledgeBaseSearch() {
     setIsDocx(false);
     setIsTextFile(false);
     setIsMarkdown(false);
+    setIsImage(false);
     setFileBuffer(null);
     setHighlightedCitation(null);
   };
@@ -559,7 +593,6 @@ export default function KnowledgeBaseSearch() {
     });
   };
 
-  // Helper function to decide which viewer to render
   const renderDocumentViewer = () => {
     if (isPdf && (fileUrl || fileBuffer)) {
       return (
@@ -630,6 +663,7 @@ export default function KnowledgeBaseSearch() {
         />
       );
     }
+    
     if (isMarkdown && (fileUrl || fileBuffer)) {
       return (
         <MarkdownViewer
@@ -639,6 +673,24 @@ export default function KnowledgeBaseSearch() {
           buffer={fileBuffer}
           highlightCitation={highlightedCitation}
           onClosePdf={handleCloseViewer}
+        />
+      );
+    }
+
+    if (isImage && (fileUrl || fileBuffer)) {
+      // Get extension from record if available
+      const recordId = recordCitations?.recordId;
+      const extension = recordId ? recordsMap[recordId]?.extension : undefined;
+      
+      return (
+        <ImageHighlighter
+          key={`image-viewer-${recordId || 'new'}`}
+          url={fileUrl}
+          buffer={fileBuffer}
+          citations={recordCitations?.documents || []}
+          highlightCitation={highlightedCitation}
+          onClosePdf={handleCloseViewer}
+          fileExtension={extension}
         />
       );
     }
@@ -655,7 +707,6 @@ export default function KnowledgeBaseSearch() {
         position: 'relative',
       }}
     >
-      {/* Sidebar - Only displayed when citation viewer is not open */}
       <KnowledgeSearchSideBar
         sx={{
           height: '100%',
@@ -669,7 +720,6 @@ export default function KnowledgeBaseSearch() {
         onToggleSidebar={toggleSidebar}
       />
 
-      {/* Main Content Area */}
       <Box
         sx={{
           maxHeight: '100vh',
@@ -677,21 +727,20 @@ export default function KnowledgeBaseSearch() {
             ? `calc(100% - ${SIDEBAR_EXPANDED_WIDTH}px)`
             : `calc(100% - ${SIDEBAR_COLLAPSED_WIDTH}px)`,
           transition: theme.transitions.create('width', {
-            duration: '0.25s', // Reduced from 0.3s
-            easing: theme.transitions.easing.sharp, // Changed from easeInOut to sharp
+            duration: '0.25s',
+            easing: theme.transitions.easing.sharp,
           }),
           display: 'flex',
           position: 'relative',
         }}
       >
-        {/* Knowledge Search Component */}
         <Box
           sx={{
             width: isCitationViewerOpen ? '50%' : '100%',
             height: '100%',
             transition: theme.transitions.create('width', {
-              duration: '0.25s', // Reduced from 0.3s
-              easing: theme.transitions.easing.sharp, // Changed from easeInOut to sharp
+              duration: '0.25s',
+              easing: theme.transitions.easing.sharp,
             }),
             overflow: 'auto',
             maxHeight: '100%',
@@ -701,6 +750,7 @@ export default function KnowledgeBaseSearch() {
           <KnowledgeSearch
             searchResults={searchResults}
             loading={loading}
+            canLoadMore={canLoadMore}
             onSearchQueryChange={handleSearchQueryChange}
             onTopKChange={handleTopKChange}
             onViewCitations={viewCitations}
@@ -708,12 +758,12 @@ export default function KnowledgeBaseSearch() {
             allConnectors={allConnectors}
           />
         </Box>
-        {(isPdf || isExcel || isTextFile || isHtml || isDocx || isMarkdown) && (
+        
+        {isCitationViewerOpen && (
           <Divider orientation="vertical" flexItem sx={{ borderRightWidth: 3 }} />
         )}
 
-        {/* Document Viewer Container */}
-        {(isPdf || isExcel || isTextFile || isHtml || isDocx || isMarkdown) && (
+        {isCitationViewerOpen && (
           <Box
             id="document-container"
             sx={{
@@ -724,24 +774,11 @@ export default function KnowledgeBaseSearch() {
               flexDirection: 'column',
             }}
           >
-            {/* Conditionally render the appropriate viewer */}
             {renderDocumentViewer()}
           </Box>
         )}
-
-        {/* Close Button for document viewers */}
-        {/* {isCitationViewerOpen && (
-          <StyledCloseButton
-            onClick={handleCloseViewer}
-            startIcon={<Icon icon={closeIcon} />}
-            size="small"
-          >
-            Close
-          </StyledCloseButton>
-        )} */}
       </Box>
 
-      {/* Error Snackbar */}
       <Snackbar
         open={snackbar.open}
         autoHideDuration={6000}

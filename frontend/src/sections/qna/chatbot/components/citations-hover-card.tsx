@@ -19,9 +19,10 @@ import {
   Tooltip,
   useTheme,
   Typography,
-  IconButton,
+  Link,
 } from '@mui/material';
 
+import { extractCleanTextFragment, addTextFragmentToUrl } from 'src/sections/knowledgebase/utils/utils';
 import { createScrollableContainerStyle } from '../utils/styles/scrollbar';
 
 // Styled components for consistent design
@@ -220,10 +221,24 @@ const CitationHoverCard = ({
   const getWebUrl = () => {
     try {
       let webUrl = citation?.metadata?.webUrl;
+      if (!webUrl) {
+        return undefined;
+      }
+
       if (citation?.metadata?.origin === 'UPLOAD' && webUrl && !webUrl.startsWith('http')) {
         const baseUrl = `${window.location.protocol}//${window.location.host}`;
         webUrl = baseUrl + webUrl;
       }
+
+      // Check if blockText exists and is not empty before adding text fragment
+      const blockText = citation?.metadata?.blockText;
+      if (blockText && typeof blockText === 'string' && blockText.trim().length > 0) {
+        const textFragment = extractCleanTextFragment(blockText, 5);
+        if (textFragment) {
+          return addTextFragmentToUrl(webUrl, textFragment);
+        }
+      }
+
       return webUrl;
     } catch (error) {
       console.warn('Error accessing webUrl:', error);
@@ -274,6 +289,11 @@ const CitationHoverCard = ({
       'md',
       'ppt',
       'pptx',
+      'jpg',
+      'jpeg',
+      'png',
+      'webp',
+      'svg',
     ];
     return viewableExtensions.includes(extension);
   }
@@ -331,9 +351,10 @@ const CitationHoverCard = ({
                   sx={{ zIndex: 2999, pb: 10 }}
                 >
                   <Box component="span" sx={{ zIndex: 2999 }}>
-                    <IconButton
-                      onClick={() => window.open(webUrl, '_blank', 'noopener,noreferrer')}
-                      size="small"
+                    <Link
+                      href={webUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
                       sx={{
                         mr: 0.75,
                         color: 'primary.main',
@@ -350,7 +371,7 @@ const CitationHoverCard = ({
                       }}
                     >
                       <Icon icon={linkIcon} width={14} height={14} />
-                    </IconButton>
+                    </Link>
                   </Box>
                 </Tooltip>
               )}
@@ -375,21 +396,17 @@ const CitationHoverCard = ({
 
           {/* Document Metadata - Fixed with safe access */}
           <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
-            {pageNumber && (
-              <MetaChip size="small" label={`Page ${pageNumber}`} />
-            )}
+            {pageNumber && <MetaChip size="small" label={`Page ${pageNumber}`} />}
             {sheetName && extension && ['xlsx', 'csv', 'xls'].includes(extension) && (
               <MetaChip size="small" label={`${sheetName}`} />
             )}
             {extension && ['xlsx', 'csv', 'xls'].includes(extension) && blockNumber && (
-              <MetaChip 
-                size="small" 
-                label={`Row ${extension === 'csv' ? blockNumber + 1 : blockNumber}`} 
+              <MetaChip
+                size="small"
+                label={`Row ${extension === 'csv' ? blockNumber + 1 : blockNumber}`}
               />
             )}
-            {extension && (
-              <MetaChip size="small" label={extension.toUpperCase()} />
-            )}
+            {extension && <MetaChip size="small" label={extension.toUpperCase()} />}
           </Box>
 
           {/* Citation Content */}

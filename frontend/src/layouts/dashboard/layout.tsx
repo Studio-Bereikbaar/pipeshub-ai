@@ -180,15 +180,15 @@ export function DashboardLayout({ sx, children, header, data }: DashboardLayoutP
                   <Box
                     component="img"
                     onClick={() => navigate('/')}
-                    src="/logo/logo-blue.svg"
+                    src="/logo/logo.svg"
                     alt="Logo"
                     sx={{
                       display: 'none',
                       [theme.breakpoints.up(layoutQuery)]: {
                         display: 'inline-flex',
                       },
-                      width: 60,
-                      height: 30,
+                      width: 40,
+                      height: 40,
                       cursor: 'pointer',
                     }}
                   />
@@ -209,7 +209,7 @@ export function DashboardLayout({ sx, children, header, data }: DashboardLayoutP
               </>
             ),
             rightArea: (
-              <Box display="flex" alignItems="center" gap={{ xs: 0, sm: 0.75 }}>
+              <Box display="flex" sx={{ mr: 1 }} alignItems="center" gap={{ xs: 0, sm: 0.75 }}>
                 <IconButton
                   component="a"
                   href="https://github.com/pipeshub-ai/pipeshub-ai"

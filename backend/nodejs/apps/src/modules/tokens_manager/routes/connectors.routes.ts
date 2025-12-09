@@ -42,7 +42,7 @@ import {
 import { userAdminCheck } from '../../user_management/middlewares/userAdminCheck';
 import { ConnectorId, ConnectorIdToNameMap } from '../../../libs/types/connector.types';
 import { metricsMiddleware } from '../../../libs/middlewares/prometheus.middleware';
-import { getActiveConnectors, getConnectorConfig, getConnectorFilterOptions, getConnectors, getConnectorSchema, getInactiveConnectors, getOAuthAuthorizationUrl, handleOAuthCallback, saveConnectorFilterOptions, toggleConnector, updateConnectorConfig } from '../controllers/connector.controllers';
+import { getActiveConnectors, getConnectorConfig, getConnectorConfigAndSchema, getConnectorFilterOptions, getConnectorByName, getConnectors, getConnectorSchema, getInactiveConnectors, getOAuthAuthorizationUrl, handleOAuthCallback, saveConnectorFilterOptions, toggleConnector, updateConnectorConfig } from '../controllers/connector.controllers';
 import { z } from 'zod';
 import { ValidationMiddleware } from '../../../libs/middlewares/validation.middleware';
 
@@ -67,12 +67,33 @@ export const updateConnectorConfigSchema = z.object({
     auth:z.any(),
     sync:z.any(),
     filters:z.any(),
+    baseUrl:z.string(),
   }),
   params: z.object({
     connectorName: z.string(),
   }),
 });
 
+export const getOAuthAuthorizationUrlSchema = z.object({
+  params: z.object({
+    connectorName: z.string(),
+  }),
+  query: z.object({
+    baseUrl:z.string(),
+  }),
+});
+
+export const handleOAuthCallbackSchema = z.object({
+  params: z.object({
+    connectorName: z.string(),
+  }),
+  query: z.object({
+    baseUrl:z.string(),
+    code: z.string().optional(),
+    state: z.string().optional(),
+    error: z.string().optional(),
+  }),
+});
 
 export function createConnectorRouter(container: Container) {
   const router = Router();
@@ -81,7 +102,6 @@ export function createConnectorRouter(container: Container) {
   );
   let config = container.get<AppConfig>('AppConfig');
   const authMiddleware = container.get<AuthMiddleware>('AuthMiddleware');
-  
    // Old api for streaming records 
    router.get(
     '/',
@@ -130,6 +150,14 @@ export function createConnectorRouter(container: Container) {
     getConnectorSchema(config)
   );
 
+  router.get(
+    '/config-schema/:connectorName',
+    authMiddleware.authenticate,
+    metricsMiddleware(container),
+    userAdminCheck,
+    getConnectorConfigAndSchema(config)
+  );
+
   router.post(
     '/toggle/:connectorName',
     authMiddleware.authenticate,
@@ -138,19 +166,30 @@ export function createConnectorRouter(container: Container) {
     toggleConnector(config)
   );
 
+  // Get single connector by name - must come after specific routes but before OAuth routes
+  router.get(
+    '/:connectorName',
+    authMiddleware.authenticate,
+    metricsMiddleware(container),
+    userAdminCheck,
+    getConnectorByName(config)
+  );
+
   router.get(
     '/:connectorName/oauth/authorize',
     authMiddleware.authenticate,
     metricsMiddleware(container),
     userAdminCheck,
+    ValidationMiddleware.validate(getOAuthAuthorizationUrlSchema),
     getOAuthAuthorizationUrl(config)
   );
 
-  router.post(
+  router.get(
     '/:connectorName/oauth/callback',
     authMiddleware.authenticate,
     metricsMiddleware(container),
     userAdminCheck,
+    ValidationMiddleware.validate(handleOAuthCallbackSchema),
     handleOAuthCallback(config)
   );
 

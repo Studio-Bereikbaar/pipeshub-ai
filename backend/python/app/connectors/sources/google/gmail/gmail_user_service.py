@@ -1,10 +1,12 @@
 # pylint: disable=E1101, W0718
 
+import asyncio
 import base64
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, TypeVar
 from uuid import uuid4
 
 import google.oauth2.credentials
@@ -23,15 +25,14 @@ from app.connectors.sources.google.common.connector_google_exceptions import (
     MailOperationError,
 )
 from app.connectors.sources.google.common.google_token_handler import CredentialKeys
-from app.connectors.sources.google.common.scopes import (
-    GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES,
-)
 from app.connectors.sources.google.gmail.gmail_drive_interface import (
     GmailDriveInterface,
 )
 from app.connectors.utils.decorators import exponential_backoff, token_refresh
 from app.connectors.utils.rate_limiter import GoogleAPIRateLimiter
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
+
+T = TypeVar('T')
 
 
 class GmailUserService:
@@ -72,11 +73,22 @@ class GmailUserService:
             self.is_delegated = (
                 credentials is not None
             )  # True if created through admin service
+            # Protect shared google service across threads
+            self._service_lock = threading.Lock()
         except Exception as e:
             raise GoogleMailError(
                 "Failed to initialize Gmail service: " + str(e),
                 details={"error": str(e)},
             )
+
+    async def _get_gmail_scopes(self) -> List[str]:
+        """Get scopes for gmail, with fallback to default readonly scope."""
+        SCOPES = await self.google_token_handler.get_account_scopes(app_name="gmail")
+        if not SCOPES:
+            SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+            self.logger.warning("Scopes for gmail not found in config, using default.")
+        self.logger.debug("Using scopes for gmail: %s", SCOPES)
+        return SCOPES
 
     @token_refresh
     async def connect_individual_user(self, org_id: str, user_id: str) -> bool:
@@ -85,11 +97,11 @@ class GmailUserService:
             self.org_id = org_id
             self.user_id = user_id
 
-            SCOPES = GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES
+            SCOPES = await self._get_gmail_scopes()
 
             try:
                 creds_data = await self.google_token_handler.get_individual_token(
-                    org_id, user_id
+                    org_id, user_id, app_name="gmail"
                 )
                 if not creds_data:
                     raise GoogleAuthError(
@@ -120,10 +132,25 @@ class GmailUserService:
 
             # Update token expiry time
             try:
-                self.token_expiry = datetime.fromtimestamp(
-                    creds_data.get("access_token_expiry_time", 0) / 1000,
-                    tz=timezone.utc,
-                )
+                # Prefer created_at + expires_in from OAuthToken if available
+                expires_in = creds_data.get("expires_in")
+                created_at_str = creds_data.get("created_at")
+                if expires_in and created_at_str:
+                    created_at = datetime.fromisoformat(created_at_str)
+                    # Treat naive datetimes as UTC
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    self.token_expiry = created_at + timedelta(seconds=int(expires_in))
+                else:
+                    # Fallback to access_token_expiry_time (ms epoch) if present
+                    expiry_ms = creds_data.get("access_token_expiry_time")
+                    if expiry_ms:
+                        self.token_expiry = datetime.fromtimestamp(
+                            int(expiry_ms) / 1000, tz=timezone.utc
+                        )
+                    else:
+                        # As a last resort, set short-lived window to avoid tight loops
+                        self.token_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
                 self.logger.info("✅ Token expiry time: %s", self.token_expiry)
             except Exception as e:
                 raise GoogleAuthError(
@@ -175,27 +202,42 @@ class GmailUserService:
         )
 
         if time_until_refresh.total_seconds() <= 0:
-            await self.google_token_handler.refresh_token(self.org_id, self.user_id)
+            await self.google_token_handler.refresh_token(self.org_id, self.user_id, app_name="gmail")
 
             creds_data = await self.google_token_handler.get_individual_token(
-                self.org_id, self.user_id
+                self.org_id, self.user_id, app_name="gmail"
             )
-
+            SCOPES = await self._get_gmail_scopes()
             creds = google.oauth2.credentials.Credentials(
                 token=creds_data.get(CredentialKeys.ACCESS_TOKEN.value),
                 refresh_token=creds_data.get(CredentialKeys.REFRESH_TOKEN.value),
                 token_uri="https://oauth2.googleapis.com/token",
                 client_id=creds_data.get(CredentialKeys.CLIENT_ID.value),
                 client_secret=creds_data.get(CredentialKeys.CLIENT_SECRET.value),
-                scopes=GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES,
+                scopes=SCOPES,
             )
 
             self.service = build("gmail", "v1", credentials=creds)
             self.logger.debug("Self Gmail Service: %s", self.service)
-            # Update token expiry time
-            self.token_expiry = datetime.fromtimestamp(
-                creds_data.get("access_token_expiry_time", 0) / 1000, tz=timezone.utc
-            )
+            # Update token expiry time using created_at + expires_in if possible
+            try:
+                expires_in = creds_data.get("expires_in")
+                created_at_str = creds_data.get("created_at")
+                if expires_in and created_at_str:
+                    created_at = datetime.fromisoformat(created_at_str)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    self.token_expiry = created_at + timedelta(seconds=int(expires_in))
+                else:
+                    expiry_ms = creds_data.get("access_token_expiry_time")
+                    if expiry_ms:
+                        self.token_expiry = datetime.fromtimestamp(
+                            int(expiry_ms) / 1000, tz=timezone.utc
+                        )
+                    else:
+                        self.token_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+            except Exception as e:
+                self.logger.warning("Failed to set refreshed token expiry: %s", str(e))
 
             self.logger.info("✅ Token refreshed, new expiry: %s", self.token_expiry)
 
@@ -494,6 +536,14 @@ class GmailUserService:
         """Get list of unique threads"""
         try:
             self.logger.info("🚀 Getting list of threads")
+            # Ensure service is initialized in case connect_* wasn't called yet
+            if self.service is None:
+                if not self.org_id or not self.user_id:
+                    raise GoogleAuthError(
+                        "Gmail service not initialized and no context to initialize",
+                        details={"org_id": self.org_id, "user_id": self.user_id},
+                    )
+                await self.connect_individual_user(self.org_id, self.user_id)
             threads = []
             page_token = None
 
@@ -726,12 +776,12 @@ class GmailUserService:
             if accountType == AccountType.INDIVIDUAL.value:
                 self.logger.info("Creating Individual Gmail User watch")
                 creds_data = await self.google_token_handler.get_individual_token(
-                    self.org_id, self.user_id
+                    self.org_id, self.user_id, app_name="gmail"
                 )
             else:
                 self.logger.info("Creating Enterprise Gmail User watch")
                 creds_data = await self.google_token_handler.get_enterprise_token(
-                    self.org_id
+                    self.org_id, app_name="gmail"
                 )
 
             enable_real_time_updates = creds_data.get("enableRealTimeUpdates", False)
@@ -959,3 +1009,33 @@ class GmailUserService:
             raise MailOperationError(
                 "Failed to fetch attachment ID", details={"error": str(e), "combined_id": combined_id}
             )
+
+    # Async wrapper methods for blocking operations
+    async def list_messages_async(self, query: str = "newer_than:30d") -> List[Dict]:
+        """Async wrapper for list_messages to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.list_messages, query))
+
+    async def list_threads_async(self, query: str = "newer_than:30d") -> List[Dict]:
+        """Async wrapper for list_threads to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.list_threads, query))
+
+    async def get_message_async(self, message_id: str) -> Dict:
+        """Async wrapper for get_message to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.get_message, message_id))
+
+    async def list_attachments_async(self, message, org_id: str, user, account_type: str) -> List[Dict]:
+        """Async wrapper for list_attachments to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.list_attachments, message, org_id, user, account_type))
+
+    async def fetch_gmail_changes_async(self, user_email: str, history_id: str) -> Dict:
+        """Async wrapper for fetch_gmail_changes to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.fetch_gmail_changes, user_email, history_id))
+
+    def _run_with_service_lock(self, func: Callable[..., T], *args, **kwargs) -> T:
+        with self._service_lock:
+            return asyncio.run(func(*args, **kwargs))

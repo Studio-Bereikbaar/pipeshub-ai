@@ -15,9 +15,7 @@ from app.config.constants.arangodb import (
     LegacyCollectionNames,
     LegacyGraphNames,
 )
-from app.connectors.sources.localKB.core.arango_service import (
-    KnowledgeBaseArangoService,
-)
+from app.connectors.services.base_arango_service import BaseArangoService
 from app.schema.arango.graph import EDGE_DEFINITIONS
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
@@ -25,7 +23,7 @@ from app.utils.time_conversion import get_epoch_timestamp_in_ms
 class KnowledgeBaseMigrationService:
     """Service to handle migration from old KB system to new recordGroups system"""
 
-    def __init__(self, arango_service: KnowledgeBaseArangoService, logger: Logger) -> None:
+    def __init__(self, arango_service: BaseArangoService, logger: Logger) -> None:
         self.arango_service = arango_service
         self.logger = logger
         self.db = arango_service.db
@@ -37,7 +35,7 @@ class KnowledgeBaseMigrationService:
 
         # New collection names (Python system)
         self.NEW_KB_COLLECTION = CollectionNames.RECORD_GROUPS.value
-        self.NEW_USER_TO_KB_EDGES = CollectionNames.PERMISSIONS_TO_KB.value
+        self.NEW_USER_TO_KB_EDGES = CollectionNames.PERMISSION.value
         self.NEW_RECORD_TO_KB_EDGES = CollectionNames.BELONGS_TO.value
         self.NEW_RECORD_RELATION_EDGES = CollectionNames.RECORD_RELATIONS.value
 
@@ -805,7 +803,7 @@ async def run_kb_migration(container) -> Dict:
     """
     try:
         logger = container.logger()
-        kb_arango_service = await container.kb_arango_service()
+        kb_arango_service = await container.arango_service()
 
         migration_service = KnowledgeBaseMigrationService(kb_arango_service,logger)
         result = await migration_service.run_migration()

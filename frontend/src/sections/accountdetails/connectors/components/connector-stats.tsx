@@ -18,11 +18,15 @@ import { ConnectorStatsCard } from './connector-stats-card';
 
 interface IndexingStatusStats {
   NOT_STARTED: number;
+  PAUSED: number;
   IN_PROGRESS: number;
   COMPLETED: number;
   FAILED: number;
   FILE_TYPE_NOT_SUPPORTED: number;
   AUTO_INDEX_OFF: number;
+  EMPTY: number;
+  ENABLE_MULTIMODAL_MODELS: number;
+  QUEUED: number;
 }
 
 interface BasicStats {
@@ -66,6 +70,7 @@ interface ConnectorStatisticsProps {
   connectorNames?: string[] | string; // Can be a single connector name or an array of names
   showUploadTab?: boolean; // Control whether to show the upload tab
   refreshInterval?: number; // Interval in milliseconds for auto-refresh
+  showActions?: boolean; // Whether to show action buttons in cards
 }
 
 // Ultra-minimalistic SaaS color palette - monochromatic with a single accent
@@ -98,6 +103,7 @@ const ConnectorStatistics = ({
   connectorNames = [],
   showUploadTab = true,
   refreshInterval = 0, // Default to no auto-refresh
+  showActions = true,
 }: ConnectorStatisticsProps): JSX.Element => {
   const theme = useTheme();
   const [loading, setLoading] = useState<boolean>(true);
@@ -112,6 +118,10 @@ const ConnectorStatistics = ({
   // Create a ref for the interval ID
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Track fetch state to prevent duplicate calls
+  const fetchInProgressRef = useRef(false);
+  const lastFetchedKeyRef = useRef<string | null>(null);
+
   // Normalize connector names with stable identity across renders
   const normalizedUpperNames = useMemo(() => {
     const list = Array.isArray(connectorNames)
@@ -122,7 +132,7 @@ const ConnectorStatistics = ({
     return list
       .map((n) => String(n).trim())
       .filter((n) => n.length > 0)
-      .map((n) => n.toUpperCase());
+      .map((n) => n);
   }, [connectorNames]);
 
   // Stable key built from content, not reference
@@ -135,6 +145,20 @@ const ConnectorStatistics = ({
   const fetchConnectorStats = useCallback(
     async (isManualRefresh = false): Promise<void> => {
       if (!isMounted.current) return;
+
+      // Prevent duplicate calls (unless manual refresh)
+      if (!isManualRefresh) {
+        if (fetchInProgressRef.current && lastFetchedKeyRef.current === namesKey) {
+          return;
+        }
+        // Skip if already fetched for this key
+        if (lastFetchedKeyRef.current === namesKey && !fetchInProgressRef.current) {
+          return;
+        }
+      }
+
+      fetchInProgressRef.current = true;
+      lastFetchedKeyRef.current = namesKey;
 
       try {
         setLoading(true);
@@ -152,7 +176,7 @@ const ConnectorStatistics = ({
         const responses = await Promise.all(
           connectorsToFetch.map(async (name) => {
             try {
-              const key = name.toUpperCase();
+              const key = name;
               const apiUrl =
                 key === 'KNOWLEDGE_BASE' || key === 'UPLOAD'
                   ? '/api/v1/knowledgeBase/stats/KB'
@@ -201,6 +225,10 @@ const ConnectorStatistics = ({
               FAILED: 10,
               FILE_TYPE_NOT_SUPPORTED: index === 0 ? 5 : 0,
               AUTO_INDEX_OFF: index === 1 ? 3 : 0,
+              EMPTY: index === 2 ? 10 : 0,
+              ENABLE_MULTIMODAL_MODELS: index === 3 ? 10 : 0,
+              QUEUED: index === 4 ? 10 : 0,
+              PAUSED: index === 5 ? 10 : 0,
             },
           },
           by_record_type: [],
@@ -217,6 +245,10 @@ const ConnectorStatistics = ({
                   FAILED: 5,
                   FILE_TYPE_NOT_SUPPORTED: 0,
                   AUTO_INDEX_OFF: 0,
+                  EMPTY: 0,
+                  ENABLE_MULTIMODAL_MODELS: 0,
+                  QUEUED: 0,
+                  PAUSED: 0,
                 },
                 by_record_type: [],
               },
@@ -235,6 +267,7 @@ const ConnectorStatistics = ({
             }, 500);
           }
         }
+        fetchInProgressRef.current = false;
       }
     },
     [namesKey, showUploadTab]
@@ -249,6 +282,12 @@ const ConnectorStatistics = ({
   useEffect(() => {
     // Make sure isMounted is true at the start
     isMounted.current = true;
+
+    // Reset fetch flag when key changes
+    if (lastFetchedKeyRef.current !== namesKey) {
+      fetchInProgressRef.current = false;
+      lastFetchedKeyRef.current = null;
+    }
 
     // Perform initial fetch
     fetchConnectorStats();
@@ -265,8 +304,9 @@ const ConnectorStatistics = ({
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
+      fetchInProgressRef.current = false;
     };
-  }, [fetchConnectorStats, refreshInterval]);
+  }, [fetchConnectorStats, refreshInterval, namesKey]);
 
   // Dark mode aware styles
   const isDark = theme.palette.mode === 'dark';
@@ -339,7 +379,7 @@ const ConnectorStatistics = ({
         <Grid container spacing={1.5}>
           {connectorStats.map((stat, index) => (
             <Grid item xs={12} sm={6} md={6} lg={4} key={`${stat.connector}-${index}`}>
-              <ConnectorStatsCard connector={stat} />
+              <ConnectorStatsCard connector={stat} showActions={showActions} />
             </Grid>
           ))}
         </Grid>

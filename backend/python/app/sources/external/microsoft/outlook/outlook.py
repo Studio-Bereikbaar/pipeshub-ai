@@ -20,6 +20,9 @@ from msgraph.generated.users.item.contacts.contacts_request_builder import (  # 
 from msgraph.generated.users.item.events.events_request_builder import (  # type: ignore
     EventsRequestBuilder,
 )
+from msgraph.generated.users.item.mail_folders.item.messages.delta.delta_request_builder import (  # type: ignore
+    DeltaRequestBuilder,
+)
 from msgraph.generated.users.item.mail_folders.mail_folders_request_builder import (  # type: ignore
     MailFoldersRequestBuilder,
 )
@@ -35,6 +38,26 @@ from app.sources.client.microsoft.microsoft import MSGraphClient
 # Outlook-specific response wrapper
 class OutlookCalendarContactsResponse:
     """Standardized Outlook API response wrapper."""
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    message: Optional[str] = None
+
+    def __init__(self, success: bool, data: Optional[Dict[str, Any]] = None, error: Optional[str] = None, message: Optional[str] = None) -> None:
+        self.success = success
+        self.data = data
+        self.error = error
+        self.message = message
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+# Outlook-specific response wrapper for mail folders
+class OutlookMailFoldersResponse:
+    """Standardized Outlook Mail Folders API response wrapper."""
     success: bool
     data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -111,7 +134,7 @@ class OutlookCalendarContactsDataSource:
         logger.info("Outlook client initialized with 681 methods")
 
     def _handle_outlook_response(self, response: object) -> OutlookCalendarContactsResponse:
-        """Handle Outlook API response with comprehensive error handling."""
+        """Handle Outlook API response with comprehensive error handling and pagination links."""
         try:
             if response is None:
                 return OutlookCalendarContactsResponse(success=False, error="Empty response from Outlook API")
@@ -136,18 +159,177 @@ class OutlookCalendarContactsDataSource:
                 success = False
                 error_msg = f"{response.code}: {response.message}"
 
+            # Check if this is a COLLECTION response or SINGLE ENTITY response
+            if isinstance(response, dict):
+                # Response is already a dict
+                response_data = {
+                    'value': response.get('value', []),
+                    'odata_next_link': response.get('@odata.nextLink') or response.get('odata_next_link'),
+                    'odata_delta_link': response.get('@odata.deltaLink') or response.get('odata_delta_link'),
+                }
+            elif hasattr(response, 'value'):
+                # COLLECTION response - has 'value' attribute
+                response_data = {
+                    'value': response.value if response.value is not None else [],
+                    'odata_next_link': response.odata_next_link if hasattr(response, 'odata_next_link') else None,
+                    'odata_delta_link': response.odata_delta_link if hasattr(response, 'odata_delta_link') else None,
+                }
+            else:
+                # SINGLE ENTITY response - return the object itself
+                response_data = response
+
             return OutlookCalendarContactsResponse(
                 success=success,
-                data=response,
+                data=response_data,
                 error=error_msg,
             )
         except Exception as e:
             logger.error(f"Error handling Outlook response: {e}")
             return OutlookCalendarContactsResponse(success=False, error=str(e))
 
+    def _handle_mail_folders_response(self, response: object) -> OutlookMailFoldersResponse:
+        """Handle mail folders API response specifically."""
+        try:
+            if response is None:
+                return OutlookMailFoldersResponse(success=False, error="Empty response from Outlook API")
+
+            success = True
+            error_msg = None
+
+            # Handle error responses
+            if hasattr(response, 'error'):
+                success = False
+                error_msg = str(response.error)
+
+            # Extract folders data from MailFolderCollectionResponse
+            folders_data = None
+            if success and hasattr(response, 'value') and response.value:
+                folders_data = {
+                    "value": [],
+                    "count": len(response.value)
+                }
+
+                # Add OData metadata if present
+                if hasattr(response, 'additional_data') and response.additional_data:
+                    if '@odata.context' in response.additional_data:
+                        folders_data["@odata.context"] = response.additional_data['@odata.context']
+
+                if hasattr(response, 'odata_next_link') and response.odata_next_link:
+                    folders_data["@odata.nextLink"] = response.odata_next_link
+
+                if hasattr(response, 'odata_count') and response.odata_count:
+                    folders_data["@odata.count"] = response.odata_count
+
+                # Process each MailFolder object
+                for folder in response.value:
+                    folder_dict = {
+                        "id": getattr(folder, 'id', None),
+                        "display_name": getattr(folder, 'display_name', None),
+                        "parent_folder_id": getattr(folder, 'parent_folder_id', None),
+                        "child_folder_count": getattr(folder, 'child_folder_count', 0),
+                        "unread_item_count": getattr(folder, 'unread_item_count', 0),
+                        "total_item_count": getattr(folder, 'total_item_count', 0),
+                        "is_hidden": getattr(folder, 'is_hidden', False)
+                    }
+
+                    # Add additional properties if they exist
+                    if hasattr(folder, 'additional_data') and folder.additional_data:
+                        if 'sizeInBytes' in folder.additional_data:
+                            folder_dict["sizeInBytes"] = folder.additional_data['sizeInBytes']
+
+                    folders_data["value"].append(folder_dict)
+
+            return OutlookMailFoldersResponse(
+                success=success,
+                data=folders_data,
+                error=error_msg,
+                message=f"Successfully retrieved {len(response.value) if response.value else 0} mail folders" if success else None
+            )
+
+        except Exception as e:
+            logger.error(f"Error handling mail folders response: {e}")
+            return OutlookMailFoldersResponse(success=False, error=str(e))
+
     def get_data_source(self) -> 'OutlookCalendarContactsDataSource':
         """Get the underlying Outlook client."""
         return self
+
+    async def fetch_all_messages_delta(
+        self,
+        user_id: str,
+        mailFolder_id: str,
+        saved_delta_link: Optional[str] = None,
+        page_size: int = 200,
+        **initial_params
+    ) -> tuple[List[Dict], Optional[str]]:
+        """Fetch all delta messages with automatic pagination.
+
+        This method automatically handles pagination by following nextLink until
+        a deltaLink is received, which indicates all changes have been retrieved.
+
+        Args:
+            user_id: User identifier
+            mailFolder_id: Mail folder identifier
+            saved_delta_link: Previously saved deltaLink for incremental sync
+            page_size: Page size preference (default 200, max for messages)
+            **initial_params: Additional parameters (select, expand, etc.) for initial request only
+
+        Returns:
+            Tuple of (all_messages, final_delta_link)
+            - all_messages: List of all message changes
+            - final_delta_link: New delta link to save for next incremental sync
+        """
+        all_messages = []
+        continuation_url = saved_delta_link
+        is_first_request = True
+
+        logger.info(f"Starting delta fetch for user {user_id}, folder {mailFolder_id}")
+        if saved_delta_link:
+            logger.info("Using saved delta link for incremental sync")
+
+        while True:
+            # On first request without saved delta, use initial params
+            if is_first_request and not continuation_url:
+                response = await self.users_user_mail_folders_mail_folder_messages_delta(
+                    user_id=user_id,
+                    mailFolder_id=mailFolder_id,
+                    continuation_url=None,
+                    page_size=page_size,
+                    **initial_params
+                )
+            else:
+                # Use continuation URL (nextLink or deltaLink)
+                response = await self.users_user_mail_folders_mail_folder_messages_delta(
+                    user_id=user_id,
+                    mailFolder_id=mailFolder_id,
+                    continuation_url=continuation_url
+                )
+
+            is_first_request = False
+
+            if not response.success:
+                raise Exception(f"Delta query failed: {response.error}")
+
+            # Collect messages from this page
+            messages = response.data.get('value', [])
+            all_messages.extend(messages)
+            logger.info(f"Retrieved {len(messages)} messages in this page (total so far: {len(all_messages)})")
+
+            # Check for next page or completion
+            next_link = response.data.get('odata_next_link')
+            delta_link = response.data.get('odata_delta_link')
+
+            if next_link:
+                # More pages available
+                logger.info("nextLink found, fetching next page...")
+                continuation_url = next_link
+                continue
+            elif delta_link:
+                # Sync complete - save this for next round
+                logger.info(f"Delta sync complete. Total messages: {len(all_messages)}")
+                return all_messages, delta_link
+            else:
+                raise Exception("Response missing both odata_next_link and odata_delta_link")
 
     # ========== MAIL OPERATIONS (217 methods) ==========
 
@@ -8939,7 +9121,7 @@ class OutlookCalendarContactsDataSource:
         skip: Optional[int] = None,
         headers: Optional[Dict[str, str]] = None,
         **kwargs
-    ) -> OutlookCalendarContactsResponse:
+    ) -> OutlookMailFoldersResponse:
         """Get mailFolders from users.
         Outlook operation: GET /users/{user-id}/mailFolders
         Operation type: mail
@@ -8996,7 +9178,7 @@ class OutlookCalendarContactsDataSource:
                 config.headers['ConsistencyLevel'] = 'eventual'
 
             response = await self.client.users.by_user_id(user_id).mail_folders.get(request_configuration=config)
-            return self._handle_outlook_response(response)
+            return self._handle_mail_folders_response(response)
         except Exception as e:
             return OutlookCalendarContactsResponse(
                 success=False,
@@ -12981,77 +13163,75 @@ class OutlookCalendarContactsDataSource:
         self,
         user_id: str,
         mailFolder_id: str,
-        changeType: Optional[str] = None,
-        dollar_select: Optional[List[str]] = None,
-        dollar_orderby: Optional[List[str]] = None,
-        dollar_expand: Optional[List[str]] = None,
+        continuation_url: Optional[str] = None,
+        page_size: Optional[int] = None,
         select: Optional[List[str]] = None,
         expand: Optional[List[str]] = None,
         filter: Optional[str] = None,
         orderby: Optional[str] = None,
         search: Optional[str] = None,
-        top: Optional[int] = None,
-        skip: Optional[int] = None,
         headers: Optional[Dict[str, str]] = None,
         **kwargs
     ) -> OutlookCalendarContactsResponse:
-        """Invoke function delta.
-        Outlook operation: GET /users/{user-id}/mailFolders/{mailFolder-id}/messages/delta()
-        Operation type: mail
+        """Invoke function delta with pagination support.
+
         Args:
             user_id (str, required): Outlook user id identifier
             mailFolder_id (str, required): Outlook mailFolder id identifier
-            changeType (str, optional): A custom query option to filter the delta response based on the type of change. Supported values are created, updated or deleted.
-            dollar_select (List[str], optional): Select properties to be returned
-            dollar_orderby (List[str], optional): Order items by property values
-            dollar_expand (List[str], optional): Expand related entities
+            continuation_url (str, optional): Complete nextLink or deltaLink URL from previous response
+            page_size (int, optional): Preferred page size (max 200 for messages)
             select (optional): Select specific properties to return
-            expand (optional): Expand related entities (e.g., attachments, calendar)
-            filter (optional): Filter the results using OData syntax
+            expand (optional): Expand related entities (e.g., attachments)
+            filter (optional): Filter the results using OData syntax (limited support)
             orderby (optional): Order the results by specified properties
-            search (optional): Search for messages, events, or contacts by content
-            top (optional): Limit number of results returned
-            skip (optional): Skip number of results for pagination
+            search (optional): Search for messages by content
             headers (optional): Additional headers for the request
             **kwargs: Additional query parameters
         Returns:
-            OutlookCalendarContactsResponse: Outlook response wrapper with success/data/error
+            OutlookCalendarContactsResponse: Outlook response wrapper with success/data/error including pagination links
         """
         # Build query parameters including OData for Outlook
         try:
-            # Use typed query parameters
-            query_params = RequestConfiguration()
+            if continuation_url:
+                # Use the complete URL from nextLink or deltaLink
+                response = await self.client.users.by_user_id(user_id).mail_folders.by_mail_folder_id(mailFolder_id).messages.delta.with_url(continuation_url).get()
+            else:
+                # Create query parameters object
+                query_params = DeltaRequestBuilder.DeltaRequestBuilderGetQueryParameters()
 
-            # Set query parameters using typed object properties
-            if select:
-                query_params.select = select if isinstance(select, list) else [select]
-            if expand:
-                query_params.expand = expand if isinstance(expand, list) else [expand]
-            if filter:
-                query_params.filter = filter
-            if orderby:
-                query_params.orderby = orderby
-            if search:
-                query_params.search = search
-            if top is not None:
-                query_params.top = top
-            if skip is not None:
-                query_params.skip = skip
+                # Set query parameters
+                if select:
+                    query_params.select = select if isinstance(select, list) else [select]
+                if expand:
+                    query_params.expand = expand if isinstance(expand, list) else [expand]
+                if filter:
+                    query_params.filter = filter
+                if orderby:
+                    query_params.orderby = orderby
+                if search:
+                    query_params.search = search
 
-            # Create proper typed request configuration
-            config = RequestConfiguration()
-            config.query_parameters = query_params
+                # Create request configuration with query parameters
+                request_configuration = RequestConfiguration(
+                    query_parameters=query_params
+                )
 
-            if headers:
-                config.headers = headers
+                # Build headers
+                if page_size or search or headers:
+                    if not request_configuration.headers:
+                        request_configuration.headers = {}
 
-            # Add consistency level for search operations in Outlook
-            if search:
-                if not config.headers:
-                    config.headers = {}
-                config.headers['ConsistencyLevel'] = 'eventual'
+                    if page_size:
+                        request_configuration.headers.add("Prefer", f"odata.maxpagesize={page_size}")
 
-            response = await self.client.users.by_user_id(user_id).mail_folders.by_mail_folder_id(mailFolder_id).messages.delta().get(request_configuration=config)
+                    if search:
+                        request_configuration.headers.add("ConsistencyLevel", "eventual")
+
+                    if headers:
+                        for key, value in headers.items():
+                            request_configuration.headers.add(key, value)
+
+                response = await self.client.users.by_user_id(user_id).mail_folders.by_mail_folder_id(mailFolder_id).messages.delta.get(request_configuration=request_configuration)
             return self._handle_outlook_response(response)
         except Exception as e:
             return OutlookCalendarContactsResponse(

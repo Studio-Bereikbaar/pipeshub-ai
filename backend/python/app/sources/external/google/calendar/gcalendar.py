@@ -1,5 +1,7 @@
 from typing import Any, Dict, Optional
 
+from app.sources.client.google.google import GoogleClient
+
 
 class GoogleCalendarDataSource:
     """
@@ -10,7 +12,7 @@ class GoogleCalendarDataSource:
     """
     def __init__(
         self,
-        client: object
+        client: GoogleClient
     ) -> None:
         """
         Initialize with Google Calendar API client.
@@ -745,7 +747,8 @@ Deprecated behavior: If a non-default event is imported, its type will be change
         maxAttendees: Optional[int] = None,
         sendNotifications: Optional[bool] = None,
         sendUpdates: Optional[str] = None,
-        supportsAttachments: Optional[bool] = None
+        supportsAttachments: Optional[bool] = None,
+        body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Google Calendar API: Creates an event.
 
@@ -777,8 +780,7 @@ Deprecated behavior: If a non-default event is imported, its type will be change
             kwargs['supportsAttachments'] = supportsAttachments
 
         # Handle request body if needed
-        if 'body' in kwargs:
-            body = kwargs.pop('body')
+        if body is not None:
             request = self.client.events().insert(**kwargs, body=body) # type: ignore
         else:
             request = self.client.events().insert(**kwargs) # type: ignore
@@ -1081,7 +1083,8 @@ Deprecated behavior: If a non-default event is imported, its type will be change
         maxAttendees: Optional[int] = None,
         sendNotifications: Optional[bool] = None,
         sendUpdates: Optional[str] = None,
-        supportsAttachments: Optional[bool] = None
+        supportsAttachments: Optional[bool] = None,
+        body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Google Calendar API: Updates an event.
 
@@ -1119,8 +1122,7 @@ Deprecated behavior: If a non-default event is imported, its type will be change
             kwargs['supportsAttachments'] = supportsAttachments
 
         # Handle request body if needed
-        if 'body' in kwargs:
-            body = kwargs.pop('body')
+        if body is not None:
             request = self.client.events().update(**kwargs, body=body) # type: ignore
         else:
             request = self.client.events().update(**kwargs) # type: ignore
@@ -1224,10 +1226,13 @@ Deprecated behavior: If a non-default event is imported, its type will be change
             request = self.client.events().watch(**kwargs) # type: ignore
         return request.execute()
 
-    async def freebusy_query(self) -> Dict[str, Any]:
+    async def freebusy_query(self, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Google Calendar API: Returns free/busy information for a set of calendars.
 
         HTTP POST freeBusy
+
+        Args:
+            body (dict, optional): Request body containing timeMin, timeMax, and items
 
         Returns:
             Dict[str, Any]: API response
@@ -1236,8 +1241,7 @@ Deprecated behavior: If a non-default event is imported, its type will be change
         # No parameters for this method
 
         # Handle request body if needed
-        if 'body' in kwargs:
-            body = kwargs.pop('body')
+        if body is not None:
             request = self.client.freebusy().query(**kwargs, body=body) # type: ignore
         else:
             request = self.client.freebusy().query(**kwargs) # type: ignore

@@ -63,7 +63,19 @@ const FILE_CONFIG = {
     jpg: '#E91E63',
     jpeg: '#E91E63',
   },
-  viewableExtensions: ['pdf', 'xlsx', 'xls', 'csv', 'docx', 'html', 'txt', 'md', 'ppt', 'pptx'],
+  viewableExtensions: [
+    'pdf',
+    'xlsx',
+    'xls',
+    'csv',
+    'docx',
+    'html',
+    'txt',
+    'md',
+    'mdx',
+    'ppt',
+    'pptx',
+  ],
 };
 
 // Default fallback icon for unknown connectors
@@ -91,6 +103,11 @@ interface SourcesAndCitationsProps {
     buffer?: ArrayBuffer
   ) => Promise<void>;
   className?: string;
+  modelInfo?: {
+    modelName?: string;
+    modelKey?: string;
+    chatMode?: string;
+  } | null;
 }
 
 const getFileIcon = (extension: string): IconifyIcon =>
@@ -98,7 +115,6 @@ const getFileIcon = (extension: string): IconifyIcon =>
 
 const isDocViewable = (extension: string): boolean => {
   if (!extension) return false;
-  console.log(extension, FILE_CONFIG.viewableExtensions);
   return FILE_CONFIG.viewableExtensions.includes(extension?.toLowerCase());
 };
 
@@ -156,7 +172,6 @@ const FileCard = React.memo(
     const connectorInfo = connectorData[file.connector?.toUpperCase()] || {
       iconPath: '/assets/icons/connectors/default.svg',
     };
-    console.log(connectorData);
 
     return (
       <Paper
@@ -275,31 +290,40 @@ const FileCard = React.memo(
 
             {/* Connector Icon */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
-              <img
-                src={connectorInfo.iconPath}
-                alt={file.connector || 'UPLOAD'}
-                width={16}
-                height={16}
-                style={{
-                  objectFit: 'contain',
-                  borderRadius: '2px',
-                }}
-                onError={(e) => {
-                  e.currentTarget.src = '/assets/icons/connectors/default.svg';
-                }}
-              />
-              <Typography
-                variant="caption"
-                sx={{
-                  color: 'text.secondary',
-                  fontSize: '11px',
-                  fontWeight: 500,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.3px',
+              <Box
+                sx={{ cursor: 'pointer', alignItems: 'center', display: 'flex', gap: 0.5 }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(file.webUrl, '_blank', 'noopener,noreferrer');
                 }}
               >
-                {file.connector || 'UPLOAD'}
-              </Typography>
+                <Icon icon={linkIcon} width={14} height={14} />
+                <img
+                  src={connectorInfo.iconPath}
+                  alt={file.connector || 'UPLOAD'}
+                  width={16}
+                  height={16}
+                  style={{
+                    objectFit: 'contain',
+                    borderRadius: '2px',
+                  }}
+                  onError={(e) => {
+                    e.currentTarget.src = '/assets/icons/connectors/default.svg';
+                  }}
+                />
+                <Typography
+                  variant="caption"
+                  sx={{
+                    color: 'text.secondary',
+                    fontSize: '11px',
+                    fontWeight: 500,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.3px',
+                  }}
+                >
+                  {file.connector || 'UPLOAD'}
+                </Typography>
+              </Box>
             </Box>
           </Stack>
 
@@ -313,29 +337,6 @@ const FileCard = React.memo(
               justifyContent: 'flex-end',
             }}
           >
-            {file.webUrl && (
-              <Button
-                size="small"
-                variant="text"
-                startIcon={<Icon icon={linkIcon} width={14} height={14} />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onViewDocument(file);
-                }}
-                sx={{
-                  textTransform: 'none',
-                  fontSize: '11px',
-                  fontWeight: 500,
-                  borderRadius: 1.5,
-                  px: 1.25,
-                  py: 0.375,
-                  minHeight: 26,
-                }}
-              >
-                Open
-              </Button>
-            )}
-
             {file.extension && isDocViewable(file.extension) && (
               <Button
                 size="small"
@@ -394,6 +395,7 @@ const SourcesAndCitations: React.FC<SourcesAndCitationsProps> = ({
   onRecordClick,
   onViewPdf,
   className,
+  modelInfo,
 }) => {
   const theme = useTheme();
   const [isFilesExpanded, setIsFilesExpanded] = useState(false);
@@ -406,7 +408,6 @@ const SourcesAndCitations: React.FC<SourcesAndCitationsProps> = ({
   const connectorData = useMemo(() => {
     const allConnectors = [...activeConnectors];
     const data: { [key: string]: { iconPath: string; color?: string } } = {};
-
     allConnectors.forEach((connector) => {
       data[connector.name.toUpperCase()] = {
         iconPath: connector.iconPath || '/assets/icons/connectors/default.svg',
@@ -484,54 +485,177 @@ const SourcesAndCitations: React.FC<SourcesAndCitationsProps> = ({
 
   // Don't render if no citations
   if (!citations || citations.length === 0) {
-    return null;
+    return modelInfo && modelInfo.modelName ? (
+      <Box
+        sx={{
+          my: 2,
+          display: 'flex',
+          gap: 0.75,
+          flexDirection: 'row',
+          justifyContent: 'flex-end',
+        }}
+      >
+        <Typography
+          variant="body2"
+          sx={{
+            color: 'text.primary',
+            fontSize: '13px',
+            fontWeight: 600,
+            fontFamily:
+              '"Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+          }}
+        >
+          <Typography
+            variant="caption"
+            sx={{
+              color: 'text.secondary',
+              fontSize: '12px',
+              fontWeight: 500,
+              textTransform: 'uppercase',
+              letterSpacing: '0.5px',
+              mr: 0.5,
+            }}
+          >
+            Model:
+          </Typography>
+          {modelInfo.modelName}
+          {modelInfo.chatMode && (
+            <Box
+              component="span"
+              sx={{
+                ml: 0.75,
+                px: 0.75,
+                py: 0.25,
+                borderRadius: 1,
+                bgcolor: (t) =>
+                  t.palette.mode === 'dark'
+                    ? alpha(t.palette.primary.main, 0.15)
+                    : alpha(t.palette.primary.main, 0.1),
+                color: (t) =>
+                  t.palette.mode === 'dark' ? t.palette.primary.light : t.palette.primary.main,
+                fontSize: '11px',
+                fontWeight: 500,
+                textTransform: 'capitalize',
+              }}
+            >
+              {modelInfo.chatMode}
+            </Box>
+          )}
+        </Typography>
+      </Box>
+    ) : null;
   }
 
   return (
     <Box className={className} sx={{ mt: 2.5 }}>
-      {/* Compact Side by Side Buttons */}
-      <Stack direction="row" spacing={1.5} sx={{ mb: 2 }}>
-        {/* Source Files Button */}
-        {uniqueFiles.length > 0 && (
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
+        {/* Compact Side by Side Buttons */}
+        <Stack direction="row" spacing={1.5} sx={{ mb: 2 }}>
+          {/* Source Files Button */}
+          {uniqueFiles.length > 0 && (
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => setIsFilesExpanded(!isFilesExpanded)}
+              startIcon={
+                <Icon icon={isFilesExpanded ? downIcon : rightIcon} width={14} height={14} />
+              }
+              sx={{
+                ...getButtonStyles(theme, 'success'),
+                minWidth: 'auto',
+                '& .MuiButton-startIcon': {
+                  marginRight: 0.75,
+                },
+              }}
+            >
+              <Icon icon={folderIcon} width={14} height={14} style={{ marginRight: 6 }} />
+              {uniqueFiles.length} {uniqueFiles.length === 1 ? 'Source' : 'Sources'}
+            </Button>
+          )}
+
+          {/* Citations Button */}
           <Button
             variant="outlined"
             size="small"
-            onClick={() => setIsFilesExpanded(!isFilesExpanded)}
+            onClick={() => setIsCitationsExpanded(!isCitationsExpanded)}
             startIcon={
-              <Icon icon={isFilesExpanded ? downIcon : rightIcon} width={14} height={14} />
+              <Icon icon={isCitationsExpanded ? downIcon : rightIcon} width={14} height={14} />
             }
             sx={{
-              ...getButtonStyles(theme, 'success'),
+              ...getButtonStyles(theme, 'primary'),
               minWidth: 'auto',
               '& .MuiButton-startIcon': {
                 marginRight: 0.75,
               },
             }}
           >
-            <Icon icon={folderIcon} width={14} height={14} style={{ marginRight: 6 }} />
-            {uniqueFiles.length} {uniqueFiles.length === 1 ? 'Source' : 'Sources'}
+            {citations.length} {citations.length === 1 ? 'Citation' : 'Citations'}
           </Button>
-        )}
-
-        {/* Citations Button */}
-        <Button
-          variant="outlined"
-          size="small"
-          onClick={() => setIsCitationsExpanded(!isCitationsExpanded)}
-          startIcon={
-            <Icon icon={isCitationsExpanded ? downIcon : rightIcon} width={14} height={14} />
-          }
-          sx={{
-            ...getButtonStyles(theme, 'primary'),
-            minWidth: 'auto',
-            '& .MuiButton-startIcon': {
-              marginRight: 0.75,
-            },
-          }}
-        >
-          {citations.length} {citations.length === 1 ? 'Citation' : 'Citations'}
-        </Button>
-      </Stack>
+        </Stack>
+        <Box>
+          {/* Model Name Display */}
+          {modelInfo?.modelName && (
+            <Box
+              sx={{
+                mb: 1.5,
+                display: 'flex',
+                flexDirection: 'row',
+                gap: 0.75,
+              }}
+            >
+              <Typography
+                variant="body2"
+                sx={{
+                  color: 'text.secondary',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  mt: 0.4,
+                }}
+              >
+                Model:
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{
+                  color: 'text.primary',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  fontFamily:
+                    '"Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+                }}
+              >
+                {modelInfo.modelName}
+                {modelInfo.chatMode && (
+                  <Box
+                    component="span"
+                    sx={{
+                      ml: 0.75,
+                      px: 0.75,
+                      py: 0.25,
+                      borderRadius: 1,
+                      bgcolor: (t) =>
+                        t.palette.mode === 'dark'
+                          ? alpha(t.palette.primary.main, 0.15)
+                          : alpha(t.palette.primary.main, 0.1),
+                      color: (t) =>
+                        t.palette.mode === 'dark'
+                          ? t.palette.primary.light
+                          : t.palette.primary.main,
+                      fontSize: '11px',
+                      fontWeight: 500,
+                      textTransform: 'capitalize',
+                    }}
+                  >
+                    {modelInfo.chatMode}
+                  </Box>
+                )}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      </Box>
 
       {/* File Sources Section */}
       {uniqueFiles.length > 0 && (

@@ -7,8 +7,10 @@ from enum import Enum
 from inspect import isclass
 from typing import Any, Callable, Dict, List, Optional, Type
 
-from app.config.constants.arangodb import CollectionNames
-from app.connectors.sources.google.common.arango_service import ArangoService
+from app.config.constants.arangodb import CollectionNames, ProgressStatus
+from app.connectors.services.base_arango_service import (
+    BaseArangoService as ArangoService,
+)
 from app.containers.connector import ConnectorAppContainer
 from app.models.entities import RecordType
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
@@ -24,15 +26,7 @@ class Permissions(str, Enum):
     OWNER = "OWNER"
     COMMENTER = "COMMENTER"
 
-class IndexingStatus(str, Enum):
-    NOT_STARTED = "NOT_STARTED"
-    IN_PROGRESS = "IN_PROGRESS"
-    PAUSED = "PAUSED"
-    COMPLETED = "COMPLETED"
-    FILE_TYPE_NOT_SUPPORTED = "FILE_TYPE_NOT_SUPPORTED"
-    MANUAL_SYNC = "MANUAL_SYNC"
-    AUTO_INDEX_OFF = "AUTO_INDEX_OFF"
-    FAILED = "FAILED"
+
 
 def Connector(
     name: str,
@@ -151,6 +145,46 @@ class ConnectorRegistry:
         except Exception as e:
             self.logger.error(f"Error discovering connectors: {e}")
 
+    def _normalize_app_name(self, name: str) -> str:
+        """
+        Normalize app name for matching (case-insensitive, ignore spaces).
+        Matches the logic used in get_app_by_name query.
+        """
+        return name.replace(' ', '').lower()
+
+    async def _get_all_db_statuses(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Batch fetch all app statuses from database in a single query.
+        Returns a dictionary mapping normalized app names to their status.
+
+        Returns:
+            Dictionary mapping normalized app name to status dict
+        """
+        try:
+            arango_service = await self._get_arango_service()
+            # Fetch all apps in one query
+            db_docs = await arango_service.get_all_documents(self.collection_name)
+
+            # Create lookup map by normalized name
+            status_map = {}
+            for doc in db_docs:
+                app_name = doc.get('name')
+                if app_name:
+                    normalized_name = self._normalize_app_name(app_name)
+                    status_map[normalized_name] = {
+                        'isActive': doc.get('isActive', False),
+                        'isConfigured': doc.get('isConfigured', False),
+                        'isAuthenticated': doc.get('isAuthenticated', False),
+                        'appGroupId': doc.get('appGroupId'),
+                        'createdAtTimestamp': doc.get('createdAtTimestamp'),
+                        'updatedAtTimestamp': doc.get('updatedAtTimestamp'),
+                    }
+
+            return status_map
+        except Exception as e:
+            self.logger.debug(f"Could not batch fetch DB statuses: {e}")
+            return {}
+
     async def _get_db_status(self, app_name: str) -> Dict[str, Any]:
         """
         Get connector status from database.
@@ -163,16 +197,11 @@ class ConnectorRegistry:
             doc = await arango_service.get_app_by_name(app_name)
 
             if doc:
-                config = doc.get('config', {})
                 return {
                     'isActive': doc.get('isActive', False),
                     'isConfigured': doc.get('isConfigured', False),
+                    'isAuthenticated': doc.get('isAuthenticated', False),
                     'appGroupId': doc.get('appGroupId'),
-                    'appDescription': doc.get('appDescription', ''),
-                    'appCategories': doc.get('appCategories', []),
-                    'supportsRealtime': config.get('supportsRealtime', False),
-                    'supportsSync': config.get('supportsSync', False),
-                    'iconPath': config.get('iconPath', '/assets/icons/connectors/default.svg'),
                     'createdAtTimestamp': doc.get('createdAtTimestamp'),
                     'updatedAtTimestamp': doc.get('updatedAtTimestamp'),
                 }
@@ -184,17 +213,14 @@ class ConnectorRegistry:
         return {
             'isActive': False,
             'isConfigured': False,
-            'appDescription': '',
-            'appCategories': [],
-            'supportsRealtime': False,
-            'supportsSync': False,
-            'iconPath': '/assets/icons/connectors/default.svg',
+            'isAuthenticated': False,
+            # Metadata (description, categories, icon, capabilities) are sourced from registry only
             'createdAtTimestamp': None,
             'updatedAtTimestamp': None,
             'config': {}
         }
 
-    async def _create_app_in_db(self, app_name: str, metadata: Dict[str, Any]) -> bool:
+    async def _create_app_in_db(self, app_name: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Create a new app entry in the database.
 
@@ -203,7 +229,7 @@ class ConnectorRegistry:
             metadata: Connector metadata from decorator
 
         Returns:
-            True if successful
+            App document if successful
         """
         try:
             arango_service = await self._get_arango_service()
@@ -213,14 +239,14 @@ class ConnectorRegistry:
                 self.logger.warning(
                     f"No organizations found in DB; skipping app creation for {app_name}"
                 )
-                return False
+                return None
 
             org_id = orgs[0].get("_key")
             if not org_id:
                 self.logger.warning(
                     f"First organization document missing _key; skipping app creation for {app_name}"
                 )
-                return False
+                return None
 
             # for having same app group id for same app group
             app_group_id = hashlib.sha256(metadata['appGroup'].encode()).hexdigest()
@@ -231,10 +257,7 @@ class ConnectorRegistry:
                 'type': metadata.get('type', app_name.upper().replace(' ', '_')),
                 'appGroup': metadata['appGroup'],
                 'appGroupId': app_group_id,
-                'appCategories': metadata.get('appCategories', []),
-                'appDescription': metadata.get('appDescription', ''),
                 'authType': metadata['authType'],
-                'config': metadata.get('config', {}),
                 'isActive': False,  # Always start as inactive
                 'isConfigured': False,
                 'createdAtTimestamp': get_epoch_timestamp_in_ms(),
@@ -259,11 +282,11 @@ class ConnectorRegistry:
                 raise Exception(f"Failed to create edge for {app_name} in database")
 
             self.logger.info(f"Created database entry for {app_name}")
-            return True
+            return app_doc
 
         except Exception as e:
             self.logger.error(f"Error creating app {app_name} in database: {e}")
-            return False
+            return None
 
     async def _deactivate_app_in_db(self, app_name: str) -> bool:
         """
@@ -315,8 +338,8 @@ class ConnectorRegistry:
     async def sync_with_database(self) -> bool:
         """
         Sync registry with database:
-        1. Create missing apps from registry (as inactive)
-        2. Deactivate apps in DB that are not in registry
+        1. Only deactivate apps in DB that are not in registry
+        2. Do NOT create apps during startup - they will be created when configured
 
         Returns:
             True if successful
@@ -328,28 +351,19 @@ class ConnectorRegistry:
             db_docs = await arango_service.get_all_documents(self.collection_name)
             db_apps = {doc['name']: doc for doc in db_docs}
 
-            created_apps = []
             deactivated_apps = []
 
-            # 1. Create missing apps from registry
-            for app_name, metadata in self._connectors.items():
-                if app_name not in db_apps:
-                    if await self._create_app_in_db(app_name, metadata):
-                        created_apps.append(app_name)
-
-            # 2. Deactivate apps in DB that are not in registry
+            # Only deactivate apps in DB that are not in registry
             for app_name, doc in db_apps.items():
                 if app_name not in self._connectors and doc.get('isActive', False):
                     if await self._deactivate_app_in_db(app_name):
                         deactivated_apps.append(app_name)
 
             # Log summary
-            if created_apps:
-                self.logger.info(f"Created {len(created_apps)} new apps: {created_apps}")
             if deactivated_apps:
                 self.logger.info(f"Deactivated {len(deactivated_apps)} apps not in registry: {deactivated_apps}")
 
-            if not created_apps and not deactivated_apps:
+            if not deactivated_apps:
                 self.logger.info("Registry and database are already in sync")
 
             return True
@@ -367,22 +381,70 @@ class ConnectorRegistry:
         Returns:
             List of connector metadata with current DB status
         """
+        # Batch fetch all app statuses in one query
+        db_statuses = await self._get_all_db_statuses()
+
         connectors = []
         for app_name, metadata in self._connectors.items():
-            db_status = await self._get_db_status(app_name)
-
+            # Use registry metadata as the primary source
             connector_info = {
                 'name': app_name,
                 'appGroup': metadata['appGroup'],
                 'authType': metadata['authType'],
-                'appDescription': db_status.get('appDescription', ''),
-                'appCategories': db_status.get('appCategories', []),
-                'iconPath': db_status.get('iconPath', '/assets/icons/connectors/default.svg'),
-                'supportsRealtime': db_status.get('config', {}).get('supportsRealtime', False),
-                'supportsSync': db_status.get('config', {}).get('supportsSync', False),
-                **db_status
+                'appDescription': metadata.get('appDescription', ''),
+                'appCategories': metadata.get('appCategories', []),
+                'iconPath': metadata.get('config', {}).get('iconPath', '/assets/icons/connectors/default.svg'),
+                'supportsRealtime': metadata.get('config', {}).get('supportsRealtime', False),
+                'supportsSync': metadata.get('config', {}).get('supportsSync', False),
+                'config': metadata.get('config', {}),
+                # Default values for DB-specific fields
+                'isActive': False,
+                'isConfigured': False,
+                'isAuthenticated': False,
+                'createdAtTimestamp': None,
+                'updatedAtTimestamp': None
             }
+
+            # Look up DB status from batch-fetched map
+            normalized_name = self._normalize_app_name(app_name)
+            db_status = db_statuses.get(normalized_name)
+            if db_status and db_status.get('createdAtTimestamp'):  # If app exists in DB
+                connector_info.update({
+                    'isActive': db_status.get('isActive', False),
+                    'isConfigured': db_status.get('isConfigured', False),
+                    'isAuthenticated': db_status.get('isAuthenticated', False),
+                    'createdAtTimestamp': db_status.get('createdAtTimestamp'),
+                    'updatedAtTimestamp': db_status.get('updatedAtTimestamp')
+                })
+                # Do not override metadata from DB; registry is source of truth
+
             connectors.append(connector_info)
+
+        # Runtime filter based on feature flag
+        try:
+            feature_flag_service = await self.container.feature_flag_service()
+            # Ensure we have the latest values
+            try:
+                await feature_flag_service.refresh()
+            except Exception as e:
+                self.logger.debug(f"Feature flag refresh failed: {e}")
+            from app.services.featureflag.config.config import CONFIG
+            beta_enabled = feature_flag_service.is_feature_enabled(CONFIG.ENABLE_BETA_CONNECTORS)
+            if not beta_enabled:
+                # Lazy import to avoid circular dependency
+                from app.connectors.core.factory.connector_factory import (
+                    ConnectorFactory,
+                )
+                beta_connectors = ConnectorFactory.list_beta_connectors()
+                connectors = [
+                    c for c in connectors
+                    if c.get('name').replace(' ', '').lower() not in beta_connectors
+                ]
+            self.logger.debug(f"Connectors names: {[c.get('name').replace(' ', '').lower() for c in connectors]}")
+        except Exception as e:
+            # On any failure, return unfiltered list (fail-open)
+            self.logger.debug(f"Feature flag filtering skipped due to error: {e}")
+
         return connectors
 
     async def get_active_connector(self) -> List[Dict[str, Any]]:
@@ -407,12 +469,41 @@ class ConnectorRegistry:
         """
         if app_name in self._connectors:
             metadata = self._connectors[app_name]
-            db_status = await self._get_db_status(app_name)
-            return {
+            connector_info = {
                 'name': app_name,
-                **metadata,
-                **db_status
+                'appGroup': metadata['appGroup'],
+                'authType': metadata['authType'],
+                'appDescription': metadata.get('appDescription', ''),
+                'appCategories': metadata.get('appCategories', []),
+                'iconPath': metadata.get('config', {}).get('iconPath', '/assets/icons/connectors/default.svg'),
+                'supportsRealtime': metadata.get('config', {}).get('supportsRealtime', False),
+                'supportsSync': metadata.get('config', {}).get('supportsSync', False),
+                'config': metadata.get('config', {}),
+                'isActive': False,
+                'isConfigured': False,
+                'isAuthenticated': False,
+                'createdAtTimestamp': None,
+                'updatedAtTimestamp': None
             }
+
+            # Only override with DB status if the app exists in database
+            try:
+                db_status = await self._get_db_status(app_name)
+                if db_status.get('createdAtTimestamp'):  # If app exists in DB
+                    connector_info.update({
+                        'isActive': db_status.get('isActive', False),
+                        'isConfigured': db_status.get('isConfigured', False),
+                        'isAuthenticated': db_status.get('isAuthenticated', False),
+                        'createdAtTimestamp': db_status.get('createdAtTimestamp'),
+                        'updatedAtTimestamp': db_status.get('updatedAtTimestamp'),
+                        'appGroupId': db_status.get('appGroupId'),
+                    })
+                    # Do not override metadata, authType or config from DB
+            except Exception as e:
+                self.logger.debug(f"Could not get DB status for {app_name}: {e}")
+
+            return connector_info
+
         return None
 
     async def get_connectors_by_group(self, app_group: str) -> List[Dict[str, Any]]:
@@ -452,13 +543,43 @@ class ConnectorRegistry:
             'appGroups': sorted(app_groups),
             'authTypes': sorted(auth_types),
             'appNames': sorted(app_names),
-            'indexingStatus': IndexingStatus.values(),
+            'indexingStatus': ProgressStatus.values(),
             'recordType': RecordType.values(),
             'origin': Origin.values(),
             'permissions': Permissions.values()
         }
 
-    async def update_connector(self, app_name: str, updates: Dict[str, Any]) -> bool:
+    async def create_app_when_configured(self, app_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Create an app in the database when it's actually configured.
+        This method should be called when a connector is being configured for the first time.
+        If the app already exists, it will skip creation.
+
+        Args:
+            app_name: Name of the application to create
+
+        Returns:
+            App document if successful or if app already exists
+        """
+        if app_name not in self._connectors:
+            self.logger.error(f"App {app_name} not found in registry")
+            return None
+
+        # Check if app already exists in database
+        try:
+            arango_service = await self._get_arango_service()
+            existing_app = await arango_service.get_app_by_name(app_name)
+            if existing_app:
+                self.logger.info(f"App {app_name} already exists in database, skipping creation")
+                return existing_app
+        except Exception as e:
+            self.logger.debug(f"Could not check if app {app_name} exists: {e}")
+
+        # Create the app if it doesn't exist
+        metadata = self._connectors[app_name]
+        return await self._create_app_in_db(app_name, metadata)
+
+    async def update_connector(self, app_name: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Update connector in database.
 
@@ -467,17 +588,17 @@ class ConnectorRegistry:
             updates:  Updates to apply
 
         Returns:
-            True if successful
+            App document if successful
         """
         try:
             arango_service = await self._get_arango_service()
 
             existing_doc = await arango_service.get_app_by_name(app_name)
             if not existing_doc:
-                self.logger.error(f"App {app_name} not found in database")
-                return False
-            updated_doc = {**existing_doc, **updates}
+                self.logger.error(f"App {app_name} not found in database. Please configure the connector first.")
+                return None
 
+            updated_doc = {**existing_doc, **updates}
 
             query = """
             FOR node IN @@collection
@@ -493,11 +614,11 @@ class ConnectorRegistry:
             })
             if not list(cursor):
                 self.logger.warning(f"Failed to update connector for app {app_name}: app not found.")
-                return False
+                return None
 
             self.logger.info(f"Updated connector for app {app_name}")
-            return True
+            return updated_doc
 
         except Exception as e:
             self.logger.error(f"Error updating connector for app {app_name}: {e}")
-            return False
+            return None

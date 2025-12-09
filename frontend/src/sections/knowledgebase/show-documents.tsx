@@ -1,20 +1,25 @@
-// RecordDocumentViewer.tsx - Viewport Mode (Full height below navbar)
+// RecordDocumentViewer.tsx - Fixed for Mail Records
 import dayjs from 'dayjs';
 import { Icon } from '@iconify/react';
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import downloadIcon from '@iconify-icons/mdi/download';
 import zipIcon from '@iconify-icons/vscode-icons/file-type-zip';
 import pdfIcon from '@iconify-icons/vscode-icons/file-type-pdf2';
-import wordIcon from '@iconify-icons/vscode-icons/file-type-word2';
 import imageIcon from '@iconify-icons/vscode-icons/file-type-image';
-import excelIcon from '@iconify-icons/vscode-icons/file-type-excel2';
 import defaultFileIcon from '@iconify-icons/mdi/file-document-outline';
-import powerpointIcon from '@iconify-icons/vscode-icons/file-type-powerpoint2';
+import emailIcon from '@iconify-icons/mdi/email-outline'; // Add email icon
 import eyeIcon from '@iconify-icons/mdi/eye';
 import closeIcon from '@iconify-icons/mdi/close';
 import fullscreenIcon from '@iconify-icons/mdi/fullscreen';
 import fullscreenExitIcon from '@iconify-icons/mdi/fullscreen-exit';
-import openInNewIcon from '@iconify-icons/mdi/open-in-new';
+import mdIcon from '@iconify-icons/vscode-icons/file-type-markdown';
+import htmlIcon from '@iconify-icons/vscode-icons/file-type-html';
+import jsonIcon from '@iconify-icons/vscode-icons/file-type-json';
+import databaseIcon from '@iconify-icons/mdi/database';
+import xlsIcon from '@iconify-icons/vscode-icons/file-type-excel';
+import docIcon from '@iconify-icons/vscode-icons/file-type-word';
+import pptIcon from '@iconify-icons/vscode-icons/file-type-powerpoint';
+import txtIcon from '@iconify-icons/vscode-icons/file-type-text';
 
 import {
   Box,
@@ -41,6 +46,10 @@ import HtmlViewer from '../qna/chatbot/components/html-highlighter';
 import TextViewer from '../qna/chatbot/components/text-highlighter';
 import MarkdownViewer from '../qna/chatbot/components/markdown-highlighter';
 import { KnowledgeBaseAPI } from './services/api';
+import ImageHighlighter from '../qna/chatbot/components/image-highlighter';
+import { getExtensionFromMimeType } from './utils/utils';
+
+const MAX_FILE_SIZE_MB = 10; // 10MB
 
 // Simplified state management for viewport mode
 interface DocumentViewerState {
@@ -53,34 +62,62 @@ interface DocumentViewerState {
   loadingStep: string;
 }
 
-// Keep the existing utility functions
-const getFileIcon = (extension: string) => {
+// Enhanced utility functions to handle both file and mail records
+const getFileIcon = (extension: string, recordType?: string) => {
+  // Handle mail records
+  if (recordType === 'MAIL') {
+    return emailIcon;
+  }
+
   const ext = extension?.replace('.', '').toLowerCase();
   switch (ext) {
     case 'pdf':
       return pdfIcon;
     case 'doc':
     case 'docx':
-      return wordIcon;
+      return docIcon;
     case 'xls':
     case 'xlsx':
-      return excelIcon;
+    case 'csv':
+      return xlsIcon;
     case 'ppt':
     case 'pptx':
-      return powerpointIcon;
+      return pptIcon;
     case 'jpg':
     case 'jpeg':
     case 'png':
+    case 'gif':
+    case 'webp':
+    case 'svg':
       return imageIcon;
     case 'zip':
     case 'rar':
+    case '7z':
       return zipIcon;
+    case 'txt':
+      return txtIcon;
+    case 'html':
+    case 'css':
+    case 'js':
+      return htmlIcon;
+    case 'md':
+    case 'mdx':
+      return mdIcon;
+    case 'json':
+      return jsonIcon;
+    case 'database':
+      return databaseIcon;
     default:
       return defaultFileIcon;
   }
 };
 
-const getExtensionColor = (extension: string) => {
+const getExtensionColor = (extension: string, recordType?: string) => {
+  // Handle mail records
+  if (recordType === 'MAIL') {
+    return '#1976d2'; // Blue for emails
+  }
+
   const ext = extension?.replace('.', '').toLowerCase();
   switch (ext) {
     case 'pdf':
@@ -94,6 +131,8 @@ const getExtensionColor = (extension: string) => {
     case 'jpg':
     case 'jpeg':
     case 'png':
+    case 'webp':
+    case 'svg':
       return '#4BAFFF';
     case 'zip':
     case 'rar':
@@ -103,13 +142,21 @@ const getExtensionColor = (extension: string) => {
   }
 };
 
-function getDocumentType(extension: string) {
+function getDocumentType(extension: string, recordType?: string) {
+  // Handle mail records - treat as HTML for rendering
+  if (recordType === 'MAIL') {
+    return 'html';
+  }
+
   if (extension === 'pdf') return 'pdf';
   if (['xlsx', 'xls', 'csv'].includes(extension)) return 'excel';
   if (extension === 'docx') return 'docx';
   if (extension === 'html') return 'html';
   if (extension === 'txt') return 'text';
   if (extension === 'md') return 'md';
+  if (extension === 'mdx') return 'mdx';
+  if (['ppt', 'pptx'].includes(extension)) return 'pdf'; // have to convert to pdf
+  if (['jpg', 'jpeg', 'png', 'webp', 'svg', 'gif'].includes(extension)) return 'image';
   return 'other';
 }
 
@@ -428,10 +475,25 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
     [record, handleCloseViewer]
   );
 
-  // Early return AFTER all hooks
-  if (!record?.fileRecord) return null;
+  // Fixed early return - check for either fileRecord OR mailRecord
+  if (!record?.fileRecord && !record?.mailRecord) return null;
 
-  const { recordName, externalRecordId, sourceCreatedAtTimestamp, fileRecord, origin } = record;
+  const {
+    recordName,
+    externalRecordId,
+    sourceCreatedAtTimestamp,
+    fileRecord,
+    mailRecord,
+    origin,
+    recordType,
+    mimeType,
+  } = record;
+
+  // Get the appropriate record data and extension
+  const extension = fileRecord?.extension
+    ? fileRecord.extension
+    : getExtensionFromMimeType(mimeType || '');
+  const recordTypeForDisplay = recordType || 'FILE';
 
   const handleDownload = async () => {
     try {
@@ -526,9 +588,11 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
           setViewerState((prev) => ({ ...prev, loadingStep: 'Connecting to document source...' }));
 
           let params = {};
+
+          // Handle PowerPoint files
           if (record?.fileRecord && ['pptx', 'ppt'].includes(record?.fileRecord?.extension)) {
-            params = { convertTo: 'pdf' };
-            if (record.fileRecord.sizeInBytes / 1048576 > 5) {
+            params = { convertTo: 'application/pdf' };
+            if (record.fileRecord.sizeInBytes / 1048576 > MAX_FILE_SIZE_MB) {
               throw new Error('Large file size, redirecting to web page');
             }
           }
@@ -575,8 +639,9 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
         }
       }
 
-      if (fileDataLoaded && record.fileRecord) {
-        const documentType = getDocumentType(record.fileRecord.extension);
+      if (fileDataLoaded) {
+        // Use recordType to determine document type for mail records
+        const documentType = getDocumentType(extension, recordTypeForDisplay);
 
         setViewerState((prev) => ({ ...prev, loadingStep: 'Opening in viewport...' }));
 
@@ -592,10 +657,13 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
           }));
         }, 800);
 
-        if (!['pdf', 'excel', 'docx', 'html', 'text', 'md'].includes(documentType)) {
+        // Support mail records in addition to existing types
+        if (
+          !['pdf', 'excel', 'docx', 'html', 'text', 'md', 'mdx', 'image'].includes(documentType)
+        ) {
           setSnackbar({
             open: true,
-            message: `Unsupported document type: ${record.fileRecord.extension}`,
+            message: `Unsupported document type: ${extension}`,
             severity: 'warning',
           });
           handleCloseViewer();
@@ -640,8 +708,6 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
             pdfUrl={fileUrl}
             pdfBuffer={fileBuffer}
             citations={[]}
-            // viewportMode={!isFullscreen} // Use viewport mode when not in fullscreen
-            // fullScreen={isFullscreen} // Use fullscreen when in fullscreen mode
           />
         );
       case 'docx':
@@ -694,6 +760,25 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
             buffer={fileBuffer}
           />
         );
+      case 'mdx':
+        return (
+          <MarkdownViewer
+            {...commonProps}
+            url={fileUrl}
+            citations={recordCitations?.documents || []}
+            buffer={fileBuffer}
+          />
+        );
+      case 'image':
+        return (
+          <ImageHighlighter
+            {...commonProps}
+            url={fileUrl}
+            buffer={fileBuffer}
+            citations={recordCitations?.documents || []}
+            fileExtension={extension}
+          />
+        );
       default:
         return null;
     }
@@ -714,18 +799,25 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
       >
         <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 3 }}>
           <Icon
-            icon={getFileIcon(fileRecord.extension)}
+            icon={getFileIcon(extension, recordTypeForDisplay)}
             width={40}
             height={40}
-            style={{ color: getExtensionColor(fileRecord.extension) }}
+            style={{ color: getExtensionColor(extension, recordTypeForDisplay) }}
           />
           <Box sx={{ flexGrow: 1 }}>
             <Typography variant="h6" gutterBottom>
               {recordName}
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              Added on {dayjs(sourceCreatedAtTimestamp).format('MMM DD, YYYY')}
+              {recordTypeForDisplay === 'MAIL' ? 'Email received' : 'Added'} on{' '}
+              {dayjs(sourceCreatedAtTimestamp).format('MMM DD, YYYY')}
             </Typography>
+            {/* Show additional info for email records */}
+            {recordTypeForDisplay === 'MAIL' && mailRecord && (
+              <Typography variant="caption" color="text.secondary" display="block">
+                From: {mailRecord.from}
+              </Typography>
+            )}
           </Box>
 
           {/* Download Button */}
@@ -735,8 +827,37 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
                 <CircularProgress size={24} />
               </Box>
             ) : (
+              <>
+                {recordTypeForDisplay !== 'MAIL' && (
+                  <>
+                    <IconButton
+                      onClick={handleDownload}
+                      sx={{
+                        color: 'primary.main',
+                        '&:hover': {
+                          backgroundColor: 'primary.light',
+                          color: 'white',
+                        },
+                      }}
+                      disabled={viewerState.phase === 'loading'}
+                    >
+                      <Icon icon={downloadIcon} width={24} />
+                    </IconButton>
+                  </>
+                )}
+              </>
+            )}
+          </Tooltip>
+
+          {/* View Document Button */}
+          {extension && (
+            <Tooltip
+              title={recordTypeForDisplay === 'MAIL' ? 'Preview email' : 'Preview document'}
+              arrow
+              placement="top"
+            >
               <IconButton
-                onClick={handleDownload}
+                onClick={viewDocument}
                 sx={{
                   color: 'primary.main',
                   '&:hover': {
@@ -746,27 +867,10 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
                 }}
                 disabled={viewerState.phase === 'loading'}
               >
-                <Icon icon={downloadIcon} width={24} />
+                <Icon icon={eyeIcon} width={24} />
               </IconButton>
-            )}
-          </Tooltip>
-
-          {/* View Document Button */}
-          <Tooltip title="Preview document" arrow placement="top">
-            <IconButton
-              onClick={viewDocument}
-              sx={{
-                color: 'primary.main',
-                '&:hover': {
-                  backgroundColor: 'primary.light',
-                  color: 'white',
-                },
-              }}
-              disabled={viewerState.phase === 'loading'}
-            >
-              <Icon icon={eyeIcon} width={24} />
-            </IconButton>
-          </Tooltip>
+            </Tooltip>
+          )}
         </Stack>
       </Box>
 
@@ -807,10 +911,10 @@ const RecordDocumentViewer = ({ record }: RecordDocumentViewerProps) => {
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   <Icon
-                    icon={getFileIcon(fileRecord.extension)}
+                    icon={getFileIcon(extension, recordTypeForDisplay)}
                     width={24}
                     height={24}
-                    style={{ color: getExtensionColor(fileRecord.extension) }}
+                    style={{ color: getExtensionColor(extension, recordTypeForDisplay) }}
                   />
                   <Typography variant="h6" noWrap>
                     {recordName}

@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 
 from aiohttp import ClientSession
 
+from app.config.constants.http_status_code import HttpStatusCode
 from app.config.key_value_store import KeyValueStore
 
 
@@ -41,6 +42,7 @@ class OAuthConfig:
     response_type: str = "code"
     grant_type: GrantType = GrantType.AUTHORIZATION_CODE
     additional_params: Dict[str, Any] = field(default_factory=dict)
+    token_access_type: Optional[str] = None
 
     def generate_state(self) -> str:
         """Generate random state for CSRF protection"""
@@ -58,6 +60,9 @@ class OAuthToken:
     scope: Optional[str] = None
     id_token: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
+    uid: Optional[str] = None   # used for dropbox
+    account_id: Optional[str] = None
+    team_id: Optional[str] = None
 
     @property
     def is_expired(self) -> bool:
@@ -83,7 +88,9 @@ class OAuthToken:
             "refresh_token": self.refresh_token,
             "scope": self.scope,
             "id_token": self.id_token,
-            "created_at": self.created_at.isoformat()
+            "created_at": self.created_at.isoformat(),
+            "uid": self.uid,
+            "account_id": self.account_id
         }
 
     @classmethod
@@ -97,12 +104,13 @@ class OAuthToken:
 class OAuthProvider:
     """OAuth Provider for handling OAuth 2.0 flows"""
 
-    def __init__(self, config: OAuthConfig, key_value_store: KeyValueStore, credentials_path: str) -> None:
+    def __init__(self, config: OAuthConfig, key_value_store: KeyValueStore, credentials_path: str, connector_name: Optional[str] = None) -> None:
         self.config = config
         self.key_value_store = key_value_store
         self._session: Optional[ClientSession] = None
         self.credentials_path = credentials_path
         self.token = None
+        self.connector_name = connector_name
 
     @property
     async def session(self) -> ClientSession:
@@ -130,6 +138,7 @@ class OAuthProvider:
             "client_id": self.config.client_id,
             "redirect_uri": self.config.redirect_uri,
             "response_type": self.config.response_type,
+            "token_access_type": self.config.token_access_type,
             "state": state
         }
 
@@ -138,6 +147,7 @@ class OAuthProvider:
 
         params.update(self.config.additional_params)
         params.update(kwargs)
+
 
         return f"{self.config.authorize_url}?{urlencode(params)}"
 
@@ -157,7 +167,20 @@ class OAuthProvider:
 
         session = await self.session
         async with session.post(self.config.token_url, data=data) as response:
-            response.raise_for_status()
+            if response.status != HttpStatusCode.SUCCESS.value:
+                # Get detailed error info for debugging
+                error_text = await response.text()
+                # Log detailed error but mask sensitive data
+                FIRST_8_CHARS = 8
+                masked_client_id = self.config.client_id[:FIRST_8_CHARS] + "..." if len(self.config.client_id) > FIRST_8_CHARS else "***"
+                error_msg = (
+                    f"OAuth token exchange failed with status {response.status}. "
+                    f"Token URL: {self.config.token_url}, "
+                    f"Redirect URI: {self.config.redirect_uri}, "
+                    f"Client ID (masked): {masked_client_id}, "
+                    f"Response: {error_text}"
+                )
+                raise Exception(error_msg)
             token_data = await response.json()
 
         token = OAuthToken(**token_data)
@@ -174,16 +197,32 @@ class OAuthProvider:
 
         session = await self.session
         async with session.post(self.config.token_url, data=data) as response:
+            if response.status == HttpStatusCode.FORBIDDEN.value:
+                # Log additional details for 403 errors (common with expired/invalid refresh tokens)
+                error_text = await response.text()
+                raise Exception(f"Token refresh failed with 403 Forbidden. This usually means the refresh token has expired or is invalid. Response: {error_text}")
             response.raise_for_status()
             token_data = await response.json()
 
         # Create new token with current timestamp
         token = OAuthToken(**token_data)
 
+        # Handle different OAuth providers:
+        # - Google: doesn't return refresh_token on refresh, so preserve the old one
+        # - Atlassian: returns a NEW refresh_token (rotating refresh tokens), so use the new one
+        # - Other providers: use new refresh_token if provided, otherwise preserve old one
+
+        # If no new refresh_token was returned, preserve the old one
+        # This handles Google and other providers that don't return refresh_token on refresh
+        if not token.refresh_token:
+            token.refresh_token = refresh_token
+
         # Update the stored credentials with the new token
         config = await self.key_value_store.get_key(self.credentials_path)
         if not isinstance(config, dict):
             config = {}
+
+        # Store the new token (which includes the new refresh_token if provided)
         config['credentials'] = token.to_dict()
         await self.key_value_store.create_key(self.credentials_path, config)
 
@@ -256,6 +295,17 @@ class OAuthProvider:
 
         # Validate state
         if not stored_state or stored_state != state:
+            # Idempotent handling: if credentials already exist, treat as success
+            existing_creds = config.get('credentials')
+            if isinstance(existing_creds, dict) and existing_creds.get('access_token'):
+                try:
+                    token = OAuthToken.from_dict(existing_creds)
+                except (TypeError, ValueError, KeyError):
+                    # If stored creds are malformed, fall back to error
+                    raise ValueError("Invalid or expired state")
+                self.token = token
+                return token
+            # No existing credentials -> genuine invalid/expired state
             raise ValueError("Invalid or expired state")
 
         token = await self.exchange_code_for_token(code=code, state=state, code_verifier=oauth_data.get("code_verifier"))
@@ -263,6 +313,8 @@ class OAuthProvider:
 
         # Clean up OAuth state and store credentials
         config['oauth'] = None  # remove transient state after successful exchange
+
+        # Store the new token (use the refresh_token from the response if available)
         config['credentials'] = token.to_dict()
         await self.key_value_store.create_key(self.credentials_path, config)
 

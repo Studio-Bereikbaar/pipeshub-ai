@@ -1,8 +1,9 @@
 # pylint: disable=E1101, W0718
 import asyncio
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 from uuid import uuid4
 
 import google.oauth2.credentials
@@ -33,12 +34,11 @@ from app.connectors.sources.google.common.connector_google_exceptions import (
     GoogleDriveError,
 )
 from app.connectors.sources.google.common.google_token_handler import CredentialKeys
-from app.connectors.sources.google.common.scopes import (
-    GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES,
-)
 from app.connectors.utils.decorators import exponential_backoff, token_refresh
 from app.connectors.utils.rate_limiter import GoogleAPIRateLimiter
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
+
+T = TypeVar('T')
 
 
 class DriveUserService:
@@ -73,6 +73,17 @@ class DriveUserService:
         self.org_id = None
         self.user_id = None
         self.is_delegated = credentials is not None
+        # Protect shared google service across threads
+        self._service_lock = threading.Lock()
+
+    async def _get_drive_scopes(self) -> List[str]:
+        """Get scopes for drive, with fallback to default readonly scope."""
+        SCOPES = await self.google_token_handler.get_account_scopes(app_name="drive")
+        if not SCOPES:
+            SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+            self.logger.warning("Scopes for drive not found in config, using default.")
+        self.logger.debug("Using scopes for drive: %s", SCOPES)
+        return SCOPES
 
     @token_refresh
     async def connect_individual_user(self, org_id: str, user_id: str) -> bool:
@@ -81,11 +92,10 @@ class DriveUserService:
             self.org_id = org_id
             self.user_id = user_id
 
-            SCOPES = GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES
-
+            SCOPES = await self._get_drive_scopes()
             try:
                 creds_data = await self.google_token_handler.get_individual_token(
-                    org_id, user_id
+                    org_id, user_id, app_name="drive"
                 )
             except Exception as e:
                 raise GoogleAuthError(
@@ -110,9 +120,25 @@ class DriveUserService:
                 )
 
             # Update token expiry time
-            self.token_expiry = datetime.fromtimestamp(
-                creds_data.get("access_token_expiry_time", 0) / 1000, tz=timezone.utc
-            )
+            try:
+                expires_in = creds_data.get("expires_in")
+                created_at_str = creds_data.get("created_at")
+                if expires_in and created_at_str:
+                    created_at = datetime.fromisoformat(created_at_str)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    self.token_expiry = created_at + timedelta(seconds=int(expires_in))
+                else:
+                    expiry_ms = creds_data.get("access_token_expiry_time")
+                    if expiry_ms:
+                        self.token_expiry = datetime.fromtimestamp(
+                            int(expiry_ms) / 1000, tz=timezone.utc
+                        )
+                    else:
+                        self.token_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+                self.logger.info("✅ Token expiry time: %s", self.token_expiry)
+            except Exception as e:
+                self.logger.warning("Failed to set token expiry: %s", str(e))
 
             try:
                 self.service = build("drive", "v3", credentials=creds)
@@ -152,28 +178,43 @@ class DriveUserService:
         )
 
         if time_until_refresh.total_seconds() <= 0:
-            await self.google_token_handler.refresh_token(self.org_id, self.user_id)
+            await self.google_token_handler.refresh_token(self.org_id, self.user_id, app_name="drive")
 
             creds_data = await self.google_token_handler.get_individual_token(
-                self.org_id, self.user_id
+                self.org_id, self.user_id, app_name="drive"
             )
-
+            SCOPES = await self._get_drive_scopes()
             creds = google.oauth2.credentials.Credentials(
                 token=creds_data.get(CredentialKeys.ACCESS_TOKEN.value),
                 refresh_token=creds_data.get(CredentialKeys.REFRESH_TOKEN.value),
                 token_uri="https://oauth2.googleapis.com/token",
                 client_id=creds_data.get(CredentialKeys.CLIENT_ID.value),
                 client_secret=creds_data.get(CredentialKeys.CLIENT_SECRET.value),
-                scopes=GOOGLE_CONNECTOR_INDIVIDUAL_SCOPES,
+                scopes=SCOPES,
             )
 
             self.service = build("drive", "v3", credentials=creds)
             self.logger.debug("Self Drive Service: %s", self.service)
 
-            # Update token expiry time
-            self.token_expiry = datetime.fromtimestamp(
-                creds_data.get("access_token_expiry_time", 0) / 1000, tz=timezone.utc
-            )
+            # Update token expiry time using created_at + expires_in if possible
+            try:
+                expires_in = creds_data.get("expires_in")
+                created_at_str = creds_data.get("created_at")
+                if expires_in and created_at_str:
+                    created_at = datetime.fromisoformat(created_at_str)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    self.token_expiry = created_at + timedelta(seconds=int(expires_in))
+                else:
+                    expiry_ms = creds_data.get("access_token_expiry_time")
+                    if expiry_ms:
+                        self.token_expiry = datetime.fromtimestamp(
+                            int(expiry_ms) / 1000, tz=timezone.utc
+                        )
+                    else:
+                        self.token_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+            except Exception as e:
+                self.logger.warning("Failed to set refreshed token expiry: %s", str(e))
 
             self.logger.info("✅ Token refreshed, new expiry: %s", self.token_expiry)
 
@@ -1024,3 +1065,28 @@ class DriveUserService:
                 "Unexpected error getting shared files: " + str(e),
                 details={"error": str(e)},
             )
+
+    # Async wrapper methods for blocking operations
+    async def list_files_in_folder_async(self, folder_id: str, include_subfolders: bool = True) -> List[Dict]:
+        """Async wrapper for list_files_in_folder to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.list_files_in_folder, folder_id, include_subfolders))
+
+    async def batch_fetch_metadata_and_permissions_async(self, file_ids: List[str], files: Optional[List[Dict]] = None) -> List[Dict]:
+        """Async wrapper for batch_fetch_metadata_and_permissions to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.batch_fetch_metadata_and_permissions, file_ids, files))
+
+    async def get_drive_info_async(self, drive_id: str, org_id: str) -> dict:
+        """Async wrapper for get_drive_info to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.get_drive_info, drive_id, org_id))
+
+    async def get_shared_with_me_files_async(self, user_email: str) -> List[Dict]:
+        """Async wrapper for get_shared_with_me_files to run in separate thread"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._run_with_service_lock(self.get_shared_with_me_files, user_email))
+
+    def _run_with_service_lock(self, func: Callable[..., T], *args, **kwargs) -> T:
+        with self._service_lock:
+            return asyncio.run(func(*args, **kwargs))

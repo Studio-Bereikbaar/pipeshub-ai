@@ -56,7 +56,7 @@ interface NodeTemplate {
   defaultConfig: Record<string, any>;
   inputs: string[];
   outputs: string[];
-  category: 'inputs' | 'llm' | 'tools' | 'memory' | 'outputs' | 'agent';
+  category: 'inputs' | 'llm' | 'tools' | 'knowledge' | 'outputs' | 'agent';
 }
 
 interface FlowBuilderCanvasProps {
@@ -234,7 +234,7 @@ const AgentBuilderCanvas: React.FC<FlowBuilderCanvasProps> = ({
     isDark,
   };
 
-  const FlowNodeWrapper = useCallback((props: any) => <FlowNode {...props} />, []);
+  const FlowNodeWrapper = useCallback((props: any) => <FlowNode {...props} onDelete={onNodeDelete} />, [onNodeDelete]);
 
   const nodeTypes: NodeTypes = {
     flowNode: FlowNodeWrapper,

@@ -2,50 +2,80 @@ import io
 import json
 from datetime import datetime
 
+from bs4 import BeautifulSoup
+from html_to_markdown import convert
+
 from app.config.constants.ai_models import (
     AzureDocIntelligenceModel,
     OCRProvider,
 )
 from app.config.constants.arangodb import (
     CollectionNames,
+    Connectors,
     ExtensionTypes,
-    MimeTypes,
+    OriginTypes,
+    ProgressStatus,
 )
 from app.config.constants.service import config_node_constants
-from app.models.entities import Record, RecordStatus, RecordType
-from app.modules.parsers.pdf.docling import DoclingPDFProcessor
+from app.exceptions.indexing_exceptions import DocumentProcessingError
+from app.models.blocks import (
+    Block,
+    BlockContainerIndex,
+    BlocksContainer,
+    BlockType,
+    CitationMetadata,
+    DataFormat,
+    Point,
+)
+from app.models.entities import Record, RecordType
+from app.modules.parsers.pdf.docling import DoclingProcessor
 from app.modules.parsers.pdf.ocr_handler import OCRHandler
 from app.modules.transformers.pipeline import IndexingPipeline
 from app.modules.transformers.transformer import TransformContext
-from app.utils.llm import get_llm
+from app.services.docling.client import DoclingClient
+from app.utils.llm import get_embedding_model_config, get_llm
+from app.utils.mimetype_to_extension import get_extension_from_mimetype
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 
 def convert_record_dict_to_record(record_dict: dict) -> Record:
+    conn_name_value = record_dict.get("connectorName")
+    try:
+        connector_name = (
+            Connectors(conn_name_value)
+            if conn_name_value is not None
+            else Connectors.KNOWLEDGE_BASE
+        )
+    except ValueError:
+        connector_name = Connectors.KNOWLEDGE_BASE
+    origin_value = record_dict.get("origin", OriginTypes.UPLOAD.value)
+    try:
+        origin = OriginTypes(origin_value)
+    except ValueError:
+        origin = OriginTypes.UPLOAD
 
-    # Map the database fields to Record model fields
+    mime_type = record_dict.get("mimeType", None)
+
     record = Record(
         id=record_dict.get("_key"),
         org_id=record_dict.get("orgId"),
         record_name=record_dict.get("recordName"),
         record_type=RecordType(record_dict.get("recordType", "FILE")),
-        record_status=RecordStatus(record_dict.get("indexingStatus", "NOT_STARTED")),
+        record_status=ProgressStatus(record_dict.get("indexingStatus", "NOT_STARTED")),
         external_record_id=record_dict.get("externalRecordId"),
         version=record_dict.get("version", 1),
-        origin=record_dict.get("origin"),
+        origin=origin,
         summary_document_id=record_dict.get("summaryDocumentId"),
         created_at=record_dict.get("createdAtTimestamp"),
         updated_at=record_dict.get("updatedAtTimestamp"),
         source_created_at=record_dict.get("sourceCreatedAtTimestamp"),
         source_updated_at=record_dict.get("sourceLastModifiedTimestamp"),
         weburl=record_dict.get("webUrl"),
-        mime_type=record_dict.get("mimeType"),
+        mime_type=mime_type,
         external_revision_id=record_dict.get("externalRevisionId"),
-        connector_name = record_dict.get("connectorName"),
+        connector_name=connector_name,
     )
-
     return record
-
 
 class Processor:
     def __init__(
@@ -68,6 +98,78 @@ class Processor:
         self.document_extraction = document_extractor
         self.sink_orchestrator = sink_orchestrator
         self.domain_extractor = domain_extractor
+
+        # Initialize Docling client for external service
+        self.docling_client = DoclingClient()
+
+    async def process_image(self, record_id, content, virtual_record_id) -> None:
+        try:
+            # Initialize image parser
+            self.logger.debug("📸 Processing image content")
+            if not content:
+                raise Exception("No image data provided")
+
+            record = await self.arango_service.get_document(
+                record_id, CollectionNames.RECORDS.value
+            )
+            if record is None:
+                self.logger.error(f"❌ Record {record_id} not found in database")
+                return
+
+            _ , config = await get_llm(self.config_service)
+            is_multimodal_llm = config.get("isMultimodal")
+
+            embedding_config = await get_embedding_model_config(self.config_service)
+            is_multimodal_embedding = embedding_config.get("isMultimodal") if embedding_config else False
+            if not is_multimodal_embedding and not is_multimodal_llm:
+                try:
+                    record.update(
+                        {
+                            "indexingStatus": ProgressStatus.ENABLE_MULTIMODAL_MODELS.value,
+                            "extractionStatus": ProgressStatus.NOT_STARTED.value,
+                        })
+
+                    docs = [record]
+                    success = await self.arango_service.batch_upsert_nodes(
+                        docs, CollectionNames.RECORDS.value
+                    )
+                    if not success:
+                        raise DocumentProcessingError(
+                            "Failed to update indexing status", doc_id=record_id
+                        )
+
+                    return
+
+                except DocumentProcessingError:
+                    raise
+                except Exception as e:
+                    raise DocumentProcessingError(
+                        "Error updating record status: " + str(e),
+                        doc_id=record_id,
+                        details={"error": str(e)},
+                    )
+
+            mime_type = record.get("mimeType")
+            if mime_type is None:
+                raise Exception("No mime type present in the record from graph db")
+            extension = get_extension_from_mimetype(mime_type)
+
+            parser = self.parsers.get(extension)
+            if not parser:
+                raise Exception(f"Unsupported extension: {extension}")
+
+            block_containers = parser.parse_image(content,extension)
+            record = convert_record_dict_to_record(record)
+            record.block_containers = block_containers
+            record.virtual_record_id = virtual_record_id
+            ctx = TransformContext(record=record)
+            pipeline = IndexingPipeline(document_extraction=self.document_extraction, sink_orchestrator=self.sink_orchestrator)
+            await pipeline.apply(ctx)
+            self.logger.info("✅ Image processing completed successfully")
+            return
+        except Exception as e:
+            self.logger.error(f"❌ Error processing image: {str(e)}")
+            raise
 
     async def process_google_slides(self, record_id, record_version, orgId, content, virtual_record_id) -> None:
         """Process Google Slides presentation and extract structured content
@@ -233,11 +335,9 @@ class Processor:
                                     }
                                 )
 
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
+            self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
+            pipeline = self.indexing_pipeline
+            await pipeline.index_documents(sentence_data,record_id)
 
             self.logger.info("✅ Google Slides processing completed successfully")
             return {
@@ -444,11 +544,9 @@ class Processor:
                                 }
                             )
 
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
+            self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
+            pipeline = self.indexing_pipeline
+            await pipeline.index_documents(sentence_data,record_id)
 
             self.logger.info("✅ Google Docs processing completed successfully")
             return {
@@ -527,11 +625,9 @@ class Processor:
                             }
                         )
 
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data, merge_documents=False)
+            self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
+            pipeline = self.indexing_pipeline
+            await pipeline.index_documents(sentence_data, record_id)
 
             self.logger.info("✅ Google sheets processing completed successfully")
             return {
@@ -547,202 +643,57 @@ class Processor:
         self, recordName, recordId, version, source, orgId, html_content, virtual_record_id
     ) -> None:
 
-
         self.logger.info("🚀 Processing Gmail Message")
 
         try:
-            # Convert binary to string
-            html_content = (
-                html_content.decode("utf-8")
-                if isinstance(html_content, bytes)
-                else html_content
-            )
-            self.logger.debug(f"📄 Decoded HTML content length: {len(html_content)}")
 
-            # Initialize HTML parser and parse content
-            self.logger.debug("📄 Processing HTML content")
-            parser = self.parsers["html"]
-            html_result = parser.parse_string(html_content)
-
-            # Get the full document structure
-            doc_dict = html_result.export_to_dict()
-            self.logger.debug("📑 Document structure processed")
-
-            # Process content in reading order
-            self.logger.debug("📑 Processing document structure in reading order")
-            ordered_content = self._process_content_in_order(doc_dict)
-
-            # Extract text in reading order
-            text_content = "\n".join(
-                item["text"].strip() for item in ordered_content if item["text"].strip()
+            await self.process_html_document(
+                recordName=recordName,
+                recordId=recordId,
+                version=version,
+                source=source,
+                orgId=orgId,
+                html_binary=html_content,
+                virtual_record_id=virtual_record_id
             )
 
-            # Extract domain metadata
-            self.logger.info("🎯 Extracting domain metadata")
-            domain_metadata = None
-            if text_content:
-                try:
-                    metadata = await self.domain_extractor.extract_metadata(
-                        text_content, orgId
-                    )
-                    record = await self.domain_extractor.save_metadata_to_db(
-                        orgId, recordId, metadata, virtual_record_id
-                    )
-                    mail = await self.arango_service.get_document(
-                        recordId, CollectionNames.MAILS.value
-                    )
-                    domain_metadata = {**record, **mail}
-                    domain_metadata["extension"] = "html"
-                    domain_metadata["mimeType"] = "text/html"
-                except Exception as e:
-                    self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                    domain_metadata = None
-
-            # Create sentence data for indexing
-            self.logger.debug("📑 Creating semantic sentences")
-            sentence_data = []
-
-            # Keep track of previous items for context
-            context_window = []
-            context_window_size = 3  # Number of previous items to include for context
-
-            for idx, item in enumerate(ordered_content, 1):
-                if item["text"].strip():
-                    context = item["context"]
-
-                    # Create context text from previous items
-                    previous_context = " ".join(
-                        [prev["text"].strip() for prev in context_window]
-                    )
-
-                    # Current item's context with previous items
-                    full_context = {
-                        "previous": previous_context,
-                        "current": item["text"].strip(),
-                    }
-
-                    # Handle potentially None page numbers
-                    context.get("pageNum")
-
-                    sentence_data.append(
-                        {
-                            "text": item["text"].strip(),
-                            "metadata": {
-                                **(domain_metadata or {}),
-                                "recordId": recordId,
-                                "blockType": context.get("label", "text"),
-                                "blockNum": [idx],
-                                "blockText": json.dumps(full_context),
-                                "virtualRecordId": virtual_record_id,
-                            },
-                        }
-                    )
-
-                    # Update context window
-                    context_window.append(item)
-                    if len(context_window) > context_window_size:
-                        context_window.pop(0)
-
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
-            else:
-                self.logger.info(" NO SENTENCES TO INDEX")
-                record = await self.arango_service.get_document(
-                    recordId, CollectionNames.RECORDS.value
-                )
-                record.update(
-                    {
-                        "indexingStatus": "COMPLETED",
-                        "extractionStatus": "COMPLETED",
-                        "lastIndexTimestamp": get_epoch_timestamp_in_ms(),
-                        "lastExtractionTimestamp": get_epoch_timestamp_in_ms(),
-                        "virtualRecordId": virtual_record_id,
-                        "isDirty": False
-                    }
-                )
-                await self.arango_service.batch_upsert_nodes(
-                    [record], CollectionNames.RECORDS.value
-                )
-
-            # Prepare metadata
-            metadata = {
-                "recordId": recordId,
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": domain_metadata,
-                "document_info": {
-                    "schema_name": doc_dict.get("schema_name"),
-                    "version": doc_dict.get("version"),
-                    "name": doc_dict.get("name"),
-                    "origin": doc_dict.get("origin"),
-                },
-                "structure_info": {
-                    "text_count": len(doc_dict.get("texts", [])),
-                    "group_count": len(doc_dict.get("groups", [])),
-                    "list_count": len(
-                        [
-                            item
-                            for item in ordered_content
-                            if item.get("context", {}).get("list_info")
-                        ]
-                    ),
-                    "heading_count": len(
-                        [
-                            item
-                            for item in ordered_content
-                            if item.get("context", {}).get("label") == "heading"
-                        ]
-                    ),
-                },
-            }
-
-            self.logger.info("✅ HTML processing completed successfully")
-            return {
-                "html_result": {
-                    "document_structure": {
-                        "body": doc_dict.get("body"),
-                        "groups": doc_dict.get("groups", []),
-                    },
-                    "metadata": domain_metadata,
-                },
-                "formatted_content": text_content,
-                "numbered_items": ordered_content,
-                "metadata": metadata,
-            }
+            self.logger.info("✅ Gmail Message processing completed successfully using markdown conversion.")
 
         except Exception as e:
-            self.logger.error(f"❌ Error processing HTML document: {str(e)}")
+            self.logger.error(f"❌ Error processing Gmail Message document: {str(e)}")
             raise
 
     async def process_pdf_with_docling(self, recordName, recordId, pdf_binary, virtual_record_id) -> None|bool:
         self.logger.info(f"🚀 Starting PDF document processing for record: {recordName}")
         try:
-            self.logger.debug("📄 Processing PDF binary content")
-            processor = DoclingPDFProcessor(logger=self.logger,config=self.config_service)
-            block_containers = await processor.load_document(recordName, pdf_binary)
-            if block_containers is False:
+            self.logger.debug("📄 Processing PDF binary content using external Docling service")
+
+            # Use external Docling service
+            record_name = recordName if recordName.endswith(".pdf") else f"{recordName}.pdf"
+
+            block_containers = await self.docling_client.process_pdf(record_name, pdf_binary)
+            if block_containers is None:
+                self.logger.error(f"❌ External Docling service failed to process {recordName}")
                 return False
+
             record = await self.arango_service.get_document(
                 recordId, CollectionNames.RECORDS.value
             )
+
             if record is None:
                 self.logger.error(f"❌ Record {recordId} not found in database")
                 return
+
             record = convert_record_dict_to_record(record)
             record.block_containers = block_containers
             record.virtual_record_id = virtual_record_id
             ctx = TransformContext(record=record)
             pipeline = IndexingPipeline(document_extraction=self.document_extraction, sink_orchestrator=self.sink_orchestrator)
             await pipeline.apply(ctx)
-            self.logger.info("✅ PDF processing completed successfully using docling")
+            self.logger.info(f"✅ PDF processing completed for record: {recordName}, using external Docling service")
             return
         except Exception as e:
-            self.logger.error(f"❌ Error processing PDF document with docling: {str(e)}")
+            self.logger.error(f"❌ Error processing PDF document with external Docling service: {str(e)}")
             raise
 
     async def process_pdf_document(
@@ -782,135 +733,91 @@ class Processor:
                 elif provider == OCRProvider.OCRMYPDF.value:
                     self.logger.debug("📚 Setting up PyMuPDF OCR handler")
                     handler = OCRHandler(
-                        self.logger, OCRProvider.OCRMYPDF.value
+                        self.logger, OCRProvider.OCRMYPDF.value, config=self.config_service
                     )
                     break
 
             if not handler:
                 self.logger.debug("📚 Setting up PyMuPDF OCR handler")
-                handler = OCRHandler(self.logger, OCRProvider.OCRMYPDF.value)
+                handler = OCRHandler(self.logger, OCRProvider.OCRMYPDF.value, config=self.config_service)
                 provider = OCRProvider.OCRMYPDF.value
 
             # Process document
             self.logger.info("🔄 Processing document with OCR handler")
-            ocr_result = await handler.process_document(pdf_binary)
+            try:
+                ocr_result = await handler.process_document(pdf_binary)
+            except Exception:
+                if provider == OCRProvider.AZURE_DI.value:
+                    self.logger.info("🔄 Switching to PyMuPDF OCR handler as Azure OCR failed")
+                    handler = OCRHandler(self.logger, OCRProvider.OCRMYPDF.value, config=self.config_service)
+                    ocr_result = await handler.process_document(pdf_binary)
+                else:
+                    raise
+
             self.logger.debug("✅ OCR processing completed")
 
             # Extract domain metadata from paragraphs
             self.logger.info("🎯 Extracting domain metadata")
-            domain_metadata = None
-            paragraphs = ocr_result.get("paragraphs", [])
-            sentences = ocr_result.get("sentences", [])
-            if paragraphs:
-                # Join all paragraph content with newlines
-                paragraphs_text = "\n ".join(
-                    p["content"].strip()
-                    for p in paragraphs
-                    if p.get("content") and p["content"].strip()
-                )
+            blocks_from_ocr = ocr_result.get("blocks", [])
+            blocks = []
+            index = 0
+            table_rows = {}
+            if blocks_from_ocr:
+                for block in blocks_from_ocr:
+                    if isinstance(block, Block):
+                        block.index = index
+                        blocks.append(block)
+                        block_type = block.type
+                        if block_type == BlockType.TABLE_ROW:
+                            if block.parent_index not in table_rows:
+                                table_rows[block.parent_index] = []
+                            table_rows[block.parent_index].append(BlockContainerIndex(block_index=index))
+                        index += 1
 
-                # Extract metadata using domain extractor
-                try:
-                    metadata = await self.domain_extractor.extract_metadata(
-                        paragraphs_text, orgId
-                    )
-                    record = await self.domain_extractor.save_metadata_to_db(
-                        orgId, recordId, metadata, virtual_record_id
-                    )
-                    file = await self.arango_service.get_document(
-                        recordId, CollectionNames.FILES.value
-                    )
-                    domain_metadata = record
-                    ocr_result["metadata"] = {**record, **file}
-                except Exception as e:
-                    self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                    domain_metadata = None
-                    ocr_result["metadata"] = None
+                    else:
+                        paragraph = block
+                        if paragraph and paragraph.get("content"):
+                            bounding_boxes = None
+                            if paragraph.get("bounding_box"):
+                                try:
+                                    bounding_boxes = [Point(x=p["x"], y=p["y"]) for p in paragraph["bounding_box"]]
+                                except (TypeError, KeyError) as e:
+                                    self.logger.warning(f"Failed to process bounding boxes: {e}")
+                                    bounding_boxes = None
 
-            # Use the OCR-processed PDF for highlighting if available
+                            blocks.append(
+                                Block(
+                                    index=index,
+                                    type=BlockType.TEXT,
+                                    format=DataFormat.TXT,
+                                    data=paragraph["content"],
+                                    comments=[],
+                                    citation_metadata=CitationMetadata(
+                                        page_number=paragraph.get("page_number"),
+                                        bounding_boxes=bounding_boxes,
+                                    ),
+                                )
+                            )
+                            index += 1
 
-            # Initialize containers
-            self.logger.debug("🏗️ Initializing result containers")
-            formatted_content = ""
-            numbered_paragraphs = []
-
-            # Process paragraphs for numbering and formatting
-            self.logger.debug("📝 Processing paragraphs")
-            paragraphs = ocr_result.get("paragraphs", [])
-            for paragraph in paragraphs:
-                paragraph["blockText"] = paragraph["content"]
-
-            # Create sentence data for indexing
-            sentence_data = []
-            sentences = ocr_result.get("sentences", [])
-            if sentences:
-                self.logger.debug("📑 Creating semantic sentences")
-
-                # Define block type mapping
-                BLOCK_TYPE_MAP = {
-                    0: "text",
-                    1: "image",
-                    2: "table",
-                    3: "list",
-                    4: "header",
-                }
-
-                # Prepare sentences for indexing with separated metadata
-                sentence_data = [
-                    {
-                        "text": s["content"].strip(),
-                        "metadata": {
-                            **ocr_result.get("metadata"),
-                            "recordId": recordId,
-                            "blockText": s["block_text"],
-                            "blockType": BLOCK_TYPE_MAP.get(s.get("block_type", 0)),
-                            "blockNum": [int(s.get("block_number", 0))],
-                            "pageNum": [int(s.get("page_number", 0))],
-                            "bounding_box": s["bounding_box"],
-                            "virtualRecordId": virtual_record_id,
-                        },
-                    }
-                    for idx, s in enumerate(sentences)
-                    if s.get("content")
-                ]
-
-            # Index sentences if available
-            if sentence_data:
-                pipeline = self.indexing_pipeline
-                # Get chunks (these will be merged based on semantic similarity)
-                await pipeline.index_documents(sentence_data)
-
-            # Prepare metadata
-            self.logger.debug("📋 Preparing metadata")
-            metadata = {
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": domain_metadata,
-                "document_info": {
-                    "ocr_provider": provider,
-                    "page_count": len(set(p.get("pageNum", 1) for p in paragraphs)),
-                },
-                "structure_info": {
-                    "paragraph_count": len(paragraphs),
-                    "sentence_count": len(sentences),
-                    "average_confidence": (
-                        sum(p.get("confidence", 1.0) for p in paragraphs)
-                        / len(paragraphs)
-                        if paragraphs
-                        else 0
-                    ),
-                },
-            }
+            block_groups = ocr_result.get("tables", [])
+            for block_group in block_groups:
+                block_group.children = table_rows.get(block_group.index, [])
+            record = await self.arango_service.get_document(
+                recordId, CollectionNames.RECORDS.value
+            )
+            if record is None:
+                self.logger.error(f"❌ Record {recordId} not found in database")
+                return
+            record = convert_record_dict_to_record(record)
+            record.block_containers = BlocksContainer(blocks=blocks, block_groups=block_groups)
+            record.virtual_record_id = virtual_record_id
+            ctx = TransformContext(record=record)
+            pipeline = IndexingPipeline(document_extraction=self.document_extraction, sink_orchestrator=self.sink_orchestrator)
+            await pipeline.apply(ctx)
 
             self.logger.info("✅ PDF processing completed successfully")
-            return {
-                "ocr_result": ocr_result,
-                "formatted_content": formatted_content,
-                "numbered_paragraphs": numbered_paragraphs,
-                "metadata": metadata,
-            }
+            return
 
         except Exception as e:
             self.logger.error(f"❌ Error processing PDF document: {str(e)}")
@@ -952,136 +859,27 @@ class Processor:
             # Convert binary to string if necessary
             # Initialize DocxParser and parse content
             self.logger.debug("📄 Processing DOCX content")
-            parser = self.parsers[ExtensionTypes.DOCX.value]
-            docx_result = parser.parse(docx_binary)
 
-            # Get the full document structure
-            doc_dict = docx_result.export_to_dict()
+            processor = DoclingProcessor(logger=self.logger,config=self.config_service)
+            block_containers = await processor.load_document(recordName, docx_binary)
 
-            # Process content in reading order
-            self.logger.debug("📑 Processing document structure in reading order")
-            ordered_content = self._process_content_in_order(doc_dict)
+            if block_containers is False:
+                raise Exception("Failed to process DOCX document. It might contain scanned pages.")
 
-            # Extract text in reading order
-            text_content = "\n".join(
-                item["text"].strip() for item in ordered_content if item["text"].strip()
+            record = await self.arango_service.get_document(
+                recordId, CollectionNames.RECORDS.value
             )
 
-            # Extract domain metadata
-            self.logger.info("🎯 Extracting domain metadata")
-            domain_metadata = None
-            if text_content:
-                try:
-                    self.logger.info("🎯 Extracting metadata from DOCX content")
-                    metadata = await self.domain_extractor.extract_metadata(
-                        text_content, orgId
-                    )
-                    record = await self.domain_extractor.save_metadata_to_db(
-                        orgId, recordId, metadata, virtual_record_id
-                    )
-                    file = await self.arango_service.get_document(
-                        recordId, CollectionNames.FILES.value
-                    )
-                    domain_metadata = {**record, **file}
-                except Exception as e:
-                    self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                    domain_metadata = None
-
-            # Create sentence data for indexing
-            self.logger.debug("📑 Creating semantic sentences")
-            sentence_data = []
-
-            # Keep track of previous items for context
-            context_window = []
-            context_window_size = 3  # Number of previous items to include for context
-
-            for idx, item in enumerate(ordered_content, 1):
-                if item["text"].strip():
-                    context = item["context"]
-
-                    # Create context text from previous items
-                    previous_context = " ".join(
-                        [prev["text"].strip() for prev in context_window]
-                    )
-
-                    # Current item's context with previous items
-                    full_context = {
-                        "previous": previous_context,
-                        "current": item["text"].strip(),
-                    }
-
-                    sentence_data.append(
-                        {
-                            "text": item["text"].strip(),
-                            "metadata": {
-                                **(domain_metadata or {}),
-                                "recordId": recordId,
-                                "blockType": context.get("label", "text"),
-                                "blockNum": [idx],
-                                "blockText": json.dumps(full_context),
-                                "virtualRecordId": virtual_record_id,
-                            },
-                        }
-                    )
-
-                    # Update context window
-                    context_window.append(item)
-                    if len(context_window) > context_window_size:
-                        context_window.pop(0)
-
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
-
-            # Prepare metadata
-            metadata = {
-                "recordId": recordId,
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": domain_metadata,
-                "document_info": {
-                    "schema_name": doc_dict.get("schema_name"),
-                    "version": doc_dict.get("version"),
-                    "name": doc_dict.get("name"),
-                    "origin": doc_dict.get("origin"),
-                },
-                "structure_info": {
-                    "text_count": len(doc_dict.get("texts", [])),
-                    "group_count": len(doc_dict.get("groups", [])),
-                    "list_count": len(
-                        [
-                            item
-                            for item in ordered_content
-                            if item.get("context", {}).get("list_info")
-                        ]
-                    ),
-                    "heading_count": len(
-                        [
-                            item
-                            for item in ordered_content
-                            if item.get("context", {}).get("label") == "heading"
-                        ]
-                    ),
-                },
-            }
-
-            self.logger.info("✅ DOCX processing completed successfully")
-            return {
-                "docx_result": {
-                    "document_structure": {
-                        "body": doc_dict.get("body"),
-                        "groups": doc_dict.get("groups", []),
-                    },
-                    "metadata": domain_metadata,
-                },
-                "formatted_content": text_content,
-                "numbered_items": ordered_content,
-                "metadata": metadata,
-            }
+            if record is None:
+                self.logger.error(f"❌ Record {recordId} not found in database")
+                raise Exception(f"Record {recordId} not found in graph db")
+            record = convert_record_dict_to_record(record)
+            record.block_containers = block_containers
+            record.virtual_record_id = virtual_record_id
+            ctx = TransformContext(record=record)
+            pipeline = IndexingPipeline(document_extraction=self.document_extraction, sink_orchestrator=self.sink_orchestrator)
+            await pipeline.apply(ctx)
+            self.logger.info("✅ Docx/Doc processing completed successfully using docling")
 
         except Exception as e:
             self.logger.error(f"❌ Error processing DOCX document: {str(e)}")
@@ -1099,127 +897,24 @@ class Processor:
             self.logger.debug("📊 Processing Excel content")
             llm, _ = await get_llm(self.config_service)
             parser = self.parsers[ExtensionTypes.XLSX.value]
-            excel_result = parser.parse(excel_binary)
-
-            # Extract domain metadata from text content
-            self.logger.info("🎯 Extracting domain metadata")
-            if excel_result["text_content"]:
-                try:
-                    self.logger.info("🎯 Extracting metadata from Excel content")
-                    metadata = await self.domain_extractor.extract_metadata(
-                        excel_result["text_content"], orgId
-                    )
-                    record = await self.domain_extractor.save_metadata_to_db(
-                        orgId, recordId, metadata, virtual_record_id
-                    )
-                    file = await self.arango_service.get_document(
-                        recordId, CollectionNames.FILES.value
-                    )
-                    # Convert datetime objects to strings
-                    domain_metadata = {
-                        k: (v.isoformat() if isinstance(v, datetime) else v)
-                        for k, v in {**record, **file}.items()
-                    }
-                except Exception as e:
-                    self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                    domain_metadata = None
-
-            # Format content for output
-            formatted_content = ""
-            numbered_items = []
-            sentence_data = []
-
-            # Process each sheet
-            self.logger.debug("📝 Processing sheets")
-            for sheet_idx, sheet_name in enumerate(excel_result["sheet_names"], 1):
-                sheet_data = await parser.process_sheet_with_summaries(llm, sheet_name)
-                if sheet_data is None:
-                    continue
-                # Add sheet entry
-                sheet_entry = {
-                    "number": f"S{sheet_idx}",
-                    "name": sheet_data["sheet_name"],
-                    "type": "sheet",
-                    "row_count": len(sheet_data["tables"]),
-                    "column_count": max(
-                        (len(table["headers"]) for table in sheet_data["tables"]),
-                        default=0,
-                    ),
-                }
-                numbered_items.append(sheet_entry)
-
-                # Format content and sentence data
-                formatted_content += f"\n[Sheet]: {sheet_data['sheet_name']}\n"
-
-                for table in sheet_data["tables"]:
-                    formatted_content += f"\nTable Summary: {table['summary']}\n"
-                    for row in table["rows"]:
-                        # Convert datetime objects in row_data to strings
-                        row_data = {
-                            k: (v.isoformat() if isinstance(v, datetime) else v)
-                            for k, v in row["raw_data"].items()
-                        }
-                        formatted_content += f"Row Data: {row_data}\n"
-                        formatted_content += (
-                            f"Natural Text: {row['natural_language_text']}\n"
-                        )
-
-                        block_num = [int(row["row_num"])] if row["row_num"] else [0]
-
-                        # Add processed rows to sentence data
-                        sentence_data.append(
-                            {
-                                "text": row["natural_language_text"],
-                                "metadata": {
-                                    **(
-                                        {
-                                            k: (
-                                                v.isoformat()
-                                                if isinstance(v, datetime)
-                                                else v
-                                            )
-                                            for k, v in domain_metadata.items()
-                                        }
-                                    ),
-                                    "recordId": recordId,
-                                    "sheetName": sheet_name,
-                                    "sheetNum": sheet_idx,
-                                    "blockNum": block_num,
-                                    "blockType": "table_row",
-                                    "blockText": json.dumps(row_data),
-                                    "virtualRecordId": virtual_record_id,
-                                },
-                            }
-                        )
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data, merge_documents=False)
-            # Prepare metadata
-            self.logger.debug("📋 Preparing metadata")
-            metadata = {
-                "recordId": recordId,
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": {
-                    k: (v.isoformat() if isinstance(v, datetime) else v)
-                    for k, v in excel_result.get("metadata", {}).items()
-                },
-                "sheet_count": len(excel_result["sheets"]),
-                "total_rows": excel_result["total_rows"],
-                "total_cells": excel_result["total_cells"],
-            }
-            self.logger.info("✅ Excel processing completed successfully")
-            return {
-                "excel_result": excel_result,
-                "formatted_content": formatted_content,
-                "numbered_items": numbered_items,
-                "metadata": metadata,
-            }
-
+            if not excel_binary:
+                self.logger.info(f"No Excel binary found for record: {recordName}")
+                await self._mark_record(recordId, ProgressStatus.EMPTY)
+                return
+            blocks_containers = await parser.parse(excel_binary, llm)
+            record = await self.arango_service.get_document(
+                recordId, CollectionNames.RECORDS.value
+            )
+            if record is None:
+                self.logger.error(f"❌ Record {recordId} not found in database")
+                raise Exception(f"Record {recordId} not found in graph db")
+            record = convert_record_dict_to_record(record)
+            record.block_containers = blocks_containers
+            record.virtual_record_id = virtual_record_id
+            ctx = TransformContext(record=record)
+            pipeline = IndexingPipeline(document_extraction=self.document_extraction, sink_orchestrator=self.sink_orchestrator)
+            await pipeline.apply(ctx)
+            self.logger.info("✅ Excel processing completed successfully.")
         except Exception as e:
             self.logger.error(f"❌ Error processing Excel document: {str(e)}")
             raise
@@ -1275,7 +970,6 @@ class Processor:
             # Try different encodings to decode binary data
             encodings = ["utf-8", "latin1", "cp1252", "iso-8859-1"]
             csv_result = None
-
             for encoding in encodings:
                 try:
                     self.logger.debug(
@@ -1301,10 +995,11 @@ class Processor:
                     self.logger.debug(f"Failed to process CSV with {encoding} encoding: {str(e)}")
                     continue
 
+
             if csv_result is None:
-                raise ValueError(
-                    "Unable to decode and process CSV file with any supported encoding"
-                )
+                self.logger.info(f"Unable to decode CSV file with any supported encoding for record: {recordName}. Setting indexing status to EMPTY.")
+                await self._mark_record(recordId, ProgressStatus.EMPTY)
+                return
 
             self.logger.debug("📑 CSV result processed")
 
@@ -1337,247 +1032,84 @@ class Processor:
             self.logger.error(f"❌ Error processing CSV document: {str(e)}")
             raise
 
-    def _process_content_in_order(self, doc_dict) -> list:
-        """
-        Process document content in proper reading order by following references.
 
-        Args:
-            doc_dict (dict): The document dictionary from Docling
 
-        Returns:
-            list: Ordered list of text items with their context
-        """
-        ordered_items = []
-        processed_refs = set()
-
-        def process_item(ref, level=0, parent_context=None) -> None:
-            """Recursively process items following references"""
-            if isinstance(ref, dict):
-                ref_path = ref.get("$ref", "")
-            else:
-                ref_path = ref
-
-            if not ref_path or ref_path in processed_refs:
-                return
-            processed_refs.add(ref_path)
-
-            if not ref_path.startswith("#/"):
-                return
-
-            path_parts = ref_path[2:].split("/")
-            item_type = path_parts[0]  # 'texts', 'groups', etc.
-            try:
-                item_index = int(path_parts[1])
-            except (IndexError, ValueError):
-                return
-
-            items = doc_dict.get(item_type, [])
-            if item_index >= len(items):
-                return
-            item = items[item_index]
-
-            # Get page number from the item's page reference
-            page_no = None
-            if "prov" in item:
-                prov = item["prov"]
-                if isinstance(prov, list) and len(prov) > 0:
-                    # Take the first page number from the prov list
-                    page_no = prov[0].get("page_no")
-                elif isinstance(prov, dict) and "$ref" in prov:
-                    # Handle legacy reference format if needed
-                    page_path = prov["$ref"]
-                    page_index = int(page_path.split("/")[-1])
-                    pages = doc_dict.get("pages", [])
-                    if page_index < len(pages):
-                        page_no = pages[page_index].get("page_no")
-
-            # Create context for current item
-            current_context = {
-                "ref": item.get("self_ref"),
-                "label": item.get("label"),
-                "level": item.get("level"),
-                "parent_context": parent_context,
-                "slide_number": item.get("slide_number"),
-                "pageNum": page_no,  # Add page number to context
+    async def _mark_record(self, record_id, indexing_status: ProgressStatus) -> None:
+        record = await self.arango_service.get_document(
+                        record_id, CollectionNames.RECORDS.value
+                    )
+        if not record:
+            raise DocumentProcessingError(
+                "Record not found in database",
+                doc_id=record_id,
+            )
+        doc = dict(record)
+        timestamp = get_epoch_timestamp_in_ms()
+        doc.update(
+            {
+                "indexingStatus": indexing_status.value,
+                "isDirty": False,
+                "lastIndexTimestamp": timestamp,
+                "extractionStatus": ProgressStatus.EMPTY.value,
+                "lastExtractionTimestamp": timestamp,
             }
+        )
 
-            if item_type == "texts":
-                ordered_items.append(
-                    {"text": item.get("text", ""), "context": current_context}
-                )
+        docs = [doc]
 
-            # Process children with current_context as parent
-            children = item.get("children", [])
-            for child in children:
-                process_item(child, level + 1, current_context)
-
-        # Start processing from body
-        body = doc_dict.get("body", {})
-        for child in body.get("children", []):
-            process_item(child)
-
-        self.logger.debug(f"Processed {len(ordered_items)} items in order")
-        return ordered_items
+        success = await self.arango_service.batch_upsert_nodes(
+            docs, CollectionNames.RECORDS.value
+        )
+        if not success:
+            raise DocumentProcessingError(
+                "Failed to update indexing status", doc_id=record_id
+            )
+        return
 
     async def process_html_document(
-        self, recordName, recordId, version, source, orgId, html_content, virtual_record_id, origin, recordType
+        self, recordName, recordId, version, source, orgId, html_binary, virtual_record_id
     ) -> None:
-        """Process HTML document and extract structured content"""
+        """Process HTML document by converting to markdown and using markdown processing"""
         self.logger.info(
             f"🚀 Starting HTML document processing for record: {recordName}"
         )
 
         try:
-            # Convert binary to string
-            html_content = (
-                html_content.decode("utf-8")
-                if isinstance(html_content, bytes)
-                else html_content
+            html_content = None
+            try:
+                soup = BeautifulSoup(html_binary, 'html.parser')
+
+                # Remove script, style, and other non-content elements
+                for element in soup(["script", "style", "noscript", "iframe", "nav", "footer", "header"]):
+                    element.decompose()
+
+                html_content = str(soup)
+
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to clean HTML: {e}")
+
+            if html_content is None:
+                if isinstance(html_binary, bytes):
+                    html_content = html_binary.decode("utf-8")
+                else:
+                    html_content = html_binary
+            html_parser = self.parsers[ExtensionTypes.HTML.value]
+            html_content = html_parser.replace_relative_image_urls(html_content)
+            markdown = convert(html_content)
+            md_binary = markdown.encode("utf-8")
+
+            # Use the existing markdown processing function
+            await self.process_md_document(
+                recordName=recordName,
+                recordId=recordId,
+                version=version,
+                source=source,
+                orgId=orgId,
+                md_binary=md_binary,
+                virtual_record_id=virtual_record_id
             )
-            self.logger.debug(f"📄 Decoded HTML content length: {len(html_content)}")
 
-            # Initialize HTML parser and parse content
-            self.logger.debug("📄 Processing HTML content")
-            parser = self.parsers[ExtensionTypes.HTML.value]
-            html_result = parser.parse_string(html_content)
-
-            # Get the full document structure
-            doc_dict = html_result.export_to_dict()
-            self.logger.debug("📑 Document structure processed")
-
-            # Process content in reading order
-            self.logger.debug("📑 Processing document structure in reading order")
-            ordered_content = self._process_content_in_order(doc_dict)
-
-            # Extract text in reading order
-            text_content = "\n".join(
-                item["text"].strip() for item in ordered_content if item["text"].strip()
-            )
-
-            # Extract domain metadata
-            self.logger.info("🎯 Extracting domain metadata")
-            domain_metadata = None
-            if text_content:
-                try:
-                    self.logger.info("🎯 Extracting metadata from HTML content")
-                    metadata = await self.domain_extractor.extract_metadata(
-                        text_content, orgId
-                    )
-                    record = await self.domain_extractor.save_metadata_to_db(
-                        orgId, recordId, metadata, virtual_record_id
-                    )
-                    if recordType == RecordType.FILE.value:
-                        file = await self.arango_service.get_document(
-                            recordId, CollectionNames.FILES.value
-                        )
-                        domain_metadata = {**record, **file}
-                    else:
-                        domain_metadata = record
-
-                except Exception as e:
-                    self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                    domain_metadata = None
-
-            # Create sentence data for indexing
-            self.logger.debug("📑 Creating semantic sentences")
-            sentence_data = []
-
-            # Keep track of previous items for context
-            context_window = []
-            context_window_size = 3  # Number of previous items to include for context
-
-            for idx, item in enumerate(ordered_content, 1):
-                if item["text"].strip():
-                    context = item["context"]
-
-                    # Create context text from previous items
-                    previous_context = " ".join(
-                        [prev["text"].strip() for prev in context_window]
-                    )
-
-                    # Current item's context with previous items
-                    full_context = {
-                        "previous": previous_context,
-                        "current": item["text"].strip(),
-                    }
-
-                    sentence_data.append(
-                        {
-                            "text": item["text"].strip(),
-                            "metadata": {
-                                **(domain_metadata or {}),
-                                "recordName": recordName,
-                                "recordId": recordId,
-                                "blockType": context.get("label", "text"),
-                                "blockNum": [idx],
-                                "blockText": json.dumps(full_context),
-                                "virtualRecordId": virtual_record_id,
-                                "mimeType": MimeTypes.HTML.value,
-                                "connectorName": source,
-                                "origin": origin,
-                                "recordType": recordType,
-                            },
-                        }
-                    )
-
-                    # Update context window
-                    context_window.append(item)
-                    if len(context_window) > context_window_size:
-                        context_window.pop(0)
-
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
-
-            # Prepare metadata
-            metadata = {
-                "recordId": recordId,
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": domain_metadata,
-                "document_info": {
-                    "schema_name": doc_dict.get("schema_name"),
-                    "version": doc_dict.get("version"),
-                    "name": doc_dict.get("name"),
-                    "origin": doc_dict.get("origin"),
-                },
-                "structure_info": {
-                    "text_count": len(doc_dict.get("texts", [])),
-                    "group_count": len(doc_dict.get("groups", [])),
-                    "list_count": len(
-                        [
-                            item
-                            for item in ordered_content
-                            if item.get("context", {}).get("list_info")
-                        ]
-                    ),
-                    "heading_count": len(
-                        [
-                            item
-                            for item in ordered_content
-                            if item.get("context", {}).get("label") == "heading"
-                        ]
-                    ),
-                },
-            }
-
-            self.logger.info("✅ HTML processing completed successfully")
-            return {
-                "html_result": {
-                    "document_structure": {
-                        "body": doc_dict.get("body"),
-                        "groups": doc_dict.get("groups", []),
-                    },
-                    "metadata": domain_metadata,
-                },
-                "formatted_content": text_content,
-                "numbered_items": ordered_content,
-                "metadata": metadata,
-            }
+            self.logger.info("✅ HTML processing completed successfully using markdown conversion.")
 
         except Exception as e:
             self.logger.error(f"❌ Error processing HTML document: {str(e)}")
@@ -1623,168 +1155,91 @@ class Processor:
 
         try:
             # Convert binary to string
-            md_content = md_binary.decode("utf-8")
+            if isinstance(md_binary, bytes):
+                md_content = md_binary.decode("utf-8")
+            else:
+                md_content = md_binary
+
+            markdown = md_content.strip()
+
+            if markdown is None or markdown == "":
+                try:
+                    await self._mark_record(recordId, ProgressStatus.EMPTY)
+                    self.logger.info("✅ HTML processing completed successfully using markdown conversion.")
+                    return
+                except DocumentProcessingError:
+                    raise
+                except Exception as e:
+                    raise DocumentProcessingError(
+                        "Error updating record status: " + str(e),
+                        doc_id=recordId,
+                        details={"error": str(e)},
+                    )
 
             # Initialize Markdown parser
             self.logger.debug("📄 Processing Markdown content")
             parser = self.parsers[ExtensionTypes.MD.value]
-            md_result = parser.parse_string(md_content)
-            # Get the full document structure
-            doc_dict = md_result.export_to_dict()
 
-            # Extract text content from all text elements
-            text_content = "\n".join(
-                text_item.get("text", "").strip()
-                for text_item in doc_dict.get("texts", [])
-                if text_item.get("text", "").strip()
+            modified_markdown, images = parser.extract_and_replace_images(markdown)
+            caption_map = {}
+            urls_to_convert = []
+
+            # Collect all image URLs
+            for image in images:
+                urls_to_convert.append(image["url"])
+
+            # Convert URLs to base64 if there are any images
+            if urls_to_convert:
+                image_parser = self.parsers[ExtensionTypes.PNG.value]
+                base64_urls = await image_parser.urls_to_base64(urls_to_convert)
+
+                # Create caption map with base64 URLs
+                for i, image in enumerate(images):
+                    if base64_urls[i]:
+                        caption_map[image["new_alt_text"]] = base64_urls[i]
+
+            md_bytes = parser.parse_string(modified_markdown)
+
+            processor = DoclingProcessor(logger=self.logger,config=self.config_service)
+            block_containers = await processor.load_document(f"{recordName}.md", md_bytes)
+            if block_containers is False:
+                raise Exception("Failed to process MD document. It might contain scanned pages.")
+
+            record = await self.arango_service.get_document(
+                recordId, CollectionNames.RECORDS.value
             )
+            if record is None:
+                self.logger.error(f"❌ Record {recordId} not found in database")
+                raise Exception(f"Record {recordId} not found in graph db")
+            record = convert_record_dict_to_record(record)
 
-            # Extract domain metadata from content
-            self.logger.info("🎯 Extracting domain metadata")
-            domain_metadata = None
-            if text_content:
-                try:
-                    metadata = await self.domain_extractor.extract_metadata(
-                        text_content, orgId
-                    )
-                    record = await self.domain_extractor.save_metadata_to_db(
-                        orgId, recordId, metadata, virtual_record_id
-                    )
-                    file = await self.arango_service.get_document(
-                        recordId, CollectionNames.FILES.value
-                    )
-                    domain_metadata = {**record, **file}
-                except Exception as e:
-                    self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                    domain_metadata = None
+            blocks = block_containers.blocks
+            for block in blocks:
+                if block.type == BlockType.IMAGE.value and block.image_metadata:
+                    caption = block.image_metadata.captions
+                    if caption:
+                        caption = caption[0]
+                        if caption in caption_map and caption_map[caption]:
+                            if block.data is None:
+                                block.data = {}
+                            if isinstance(block.data, dict):
+                                block.data["uri"] = caption_map[caption]
+                            else:
+                                # If data is not a dict, create a new dict with the uri
+                                block.data = {"uri": caption_map[caption]}
+                        else:
+                            self.logger.warning(f"⚠️ Skipping image with caption '{caption}' - no valid base64 data available")
 
-            # Format content for output
-            formatted_content = ""
-            numbered_items = []
+            block_containers.blocks = blocks
 
-            # Process text items for numbering and formatting
-            self.logger.debug("📝 Processing text items")
-            for idx, item in enumerate(doc_dict.get("texts", []), 1):
-                if item.get("text", "").strip():
-                    # Create item entry with metadata
-                    item_entry = {
-                        "number": idx,
-                        "content": item["text"].strip(),
-                        "type": item.get("label", "text"),
-                        "level": item.get("level"),
-                        "parent_ref": item.get("parent", {}).get("$ref"),
-                        "children_refs": [
-                            child.get("$ref") for child in item.get("children", [])
-                        ],
-                        "code_language": (
-                            item.get("language")
-                            if item.get("label") == "code"
-                            else None
-                        ),
-                    }
-                    numbered_items.append(item_entry)
-                    formatted_content += f"[{idx}] {item['text'].strip()}\n\n"
 
-            # Create sentence data for indexing
-            self.logger.debug("📑 Creating semantic sentences")
-            sentence_data = []
-
-            # Keep track of previous items for context
-            context_window = []
-            context_window_size = 3  # Number of previous items to include for context
-
-            for idx, item in enumerate(doc_dict.get("texts", []), 1):
-                # Create context text from previous items
-                previous_context = " ".join(
-                    [prev.get("text", "").strip() for prev in context_window]
-                )
-
-                # Current item's context with previous items
-                full_context = {
-                    "previous": previous_context,
-                    "current": item["text"].strip(),
-                }
-
-                sentence_data.append(
-                    {
-                        "text": item["text"].strip(),
-                        "metadata": {
-                            **(domain_metadata or {}),
-                            "recordId": recordId,
-                            "blockType": item.get("label", "text"),
-                            "blockNum": [idx],
-                            "blockText": json.dumps(full_context),
-                            "virtualRecordId": virtual_record_id,
-                            "codeLanguage": (
-                                item.get("language")
-                                if item.get("label") == "code"
-                                else None
-                            ),
-                        },
-                    }
-                )
-
-                # Update context window
-                context_window.append(item)
-                if len(context_window) > context_window_size:
-                    context_window.pop(0)
-
-            # Index sentences if available
-            if sentence_data:
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
-
-            # Prepare metadata
-            self.logger.debug("📋 Preparing metadata")
-            metadata = {
-                "recordId": recordId,
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": domain_metadata,
-                "document_info": {
-                    "schema_name": doc_dict.get("schema_name"),
-                    "version": doc_dict.get("version"),
-                    "name": doc_dict.get("name"),
-                    "origin": doc_dict.get("origin"),
-                },
-                "structure_info": {
-                    "text_count": len(doc_dict.get("texts", [])),
-                    "group_count": len(doc_dict.get("groups", [])),
-                    "table_count": len(doc_dict.get("tables", [])),
-                    "code_block_count": len(
-                        [
-                            item
-                            for item in doc_dict.get("texts", [])
-                            if item.get("label") == "code"
-                        ]
-                    ),
-                    "heading_count": len(
-                        [
-                            item
-                            for item in doc_dict.get("texts", [])
-                            if item.get("label") == "heading"
-                        ]
-                    ),
-                },
-            }
-
-            self.logger.info("✅ Markdown processing completed successfully")
-            return {
-                "md_result": {
-                    "items": numbered_items,
-                    "document_structure": {
-                        "body": doc_dict.get("body"),
-                        "groups": doc_dict.get("groups"),
-                    },
-                    "metadata": domain_metadata,
-                },
-                "formatted_content": formatted_content,
-                "numbered_items": numbered_items,
-                "metadata": metadata,
-            }
-
+            record.block_containers = block_containers
+            record.virtual_record_id = virtual_record_id
+            ctx = TransformContext(record=record)
+            pipeline = IndexingPipeline(document_extraction=self.document_extraction, sink_orchestrator=self.sink_orchestrator)
+            await pipeline.apply(ctx)
+            self.logger.info("✅ MD processing completed successfully using docling")
+            return
         except Exception as e:
             self.logger.error(f"❌ Error processing Markdown document: {str(e)}")
             raise
@@ -1817,110 +1272,17 @@ class Processor:
                     "Unable to decode text file with any supported encoding"
                 )
 
-            # Extract domain metadata
-            self.logger.info("🎯 Extracting domain metadata")
-            domain_metadata = None
-            try:
-                metadata = await self.domain_extractor.extract_metadata(
-                    text_content, orgId
-                )
-                record = await self.domain_extractor.save_metadata_to_db(
-                    orgId, recordId, metadata, virtual_record_id
-                )
-                file = await self.arango_service.get_document(
-                    recordId, CollectionNames.FILES.value
-                )
-                domain_metadata = {**record, **file}
-            except Exception as e:
-                self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                domain_metadata = None
-
-            # Split content into blocks (paragraphs)
-            blocks = [
-                block.strip() for block in text_content.split("\n\n") if block.strip()
-            ]
-
-            # Format content and create numbered items
-            formatted_content = ""
-            numbered_items = []
-            sentence_data = []
-
-            # Keep track of previous blocks for context
-            context_window = []
-            context_window_size = 3
-
-            for idx, block in enumerate(blocks, 1):
-                # Create numbered item
-                item_entry = {"number": idx, "content": block, "type": "paragraph"}
-                numbered_items.append(item_entry)
-                formatted_content += f"[{idx}] {block}\n\n"
-
-                # Create context from previous blocks
-                previous_context = " ".join([prev for prev in context_window])
-
-                # Current block's context with previous blocks
-                full_context = {"previous": previous_context, "current": block}
-
-                # Add to sentence data for indexing
-                sentence_data.append(
-                    {
-                        "text": block,
-                        "metadata": {
-                            **(domain_metadata or {}),
-                            "recordName": recordName,
-                            "orgId": orgId,
-                            "recordId": recordId,
-                            "blockType": "text",
-                            "blockNum": [idx],
-                            "blockText": json.dumps(full_context),
-                            "virtualRecordId": virtual_record_id,
-                            "recordType": recordType,
-                            "connectorName": connectorName,
-                            "origin": origin,
-                            "mimeType": MimeTypes.PLAIN_TEXT.value,
-                        },
-                    }
-                )
-
-                # Update context window
-                context_window.append(block)
-                if len(context_window) > context_window_size:
-                    context_window.pop(0)
-
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug(f"📑 Indexing {len(sentence_data)} sentences")
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
-
-            # Prepare metadata
-            metadata = {
-                "recordId": recordId,
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": domain_metadata,
-                "document_info": {
-                    "encoding": encoding,
-                    "size": len(text_content),
-                    "line_count": text_content.count("\n") + 1,
-                },
-                "structure_info": {
-                    "paragraph_count": len(blocks),
-                    "character_count": len(text_content),
-                    "word_count": len(text_content.split()),
-                },
-            }
-
+            await self.process_md_document(
+                recordName=recordName,
+                recordId=recordId,
+                version=version,
+                source=source,
+                orgId=orgId,
+                md_binary=text_content,
+                virtual_record_id=virtual_record_id
+            )
             self.logger.info("✅ TXT processing completed successfully")
-            return {
-                "txt_result": {"content": text_content, "metadata": domain_metadata},
-                "formatted_content": formatted_content,
-                "numbered_items": numbered_items,
-                "metadata": metadata,
-            }
-
+            return
         except Exception as e:
             self.logger.error(f"❌ Error processing TXT document: {str(e)}")
             raise
@@ -1945,232 +1307,25 @@ class Processor:
         try:
             # Initialize PPTX parser
             self.logger.debug("📄 Processing PPTX content")
-            parser = self.parsers[ExtensionTypes.PPTX.value]
-            pptx_result = parser.parse_binary(pptx_binary)
 
-            # Get the full document structure
-            doc_dict = pptx_result.export_to_dict()
-
-            # Log structure counts
-            self.logger.debug("📊 Document structure counts:")
-            self.logger.debug(f"- Texts: {len(doc_dict.get('texts', []))}")
-            self.logger.debug(f"- Groups: {len(doc_dict.get('groups', []))}")
-            self.logger.debug(f"- Pictures: {len(doc_dict.get('pictures', []))}")
-
-            # Process content in reading order
-            ordered_items = []
-            processed_refs = set()
-
-            def process_item(ref, level=0, parent_context=None) -> None:
-                if isinstance(ref, dict):
-                    ref_path = ref.get("$ref", "")
-                else:
-                    ref_path = ref
-
-                if not ref_path or ref_path in processed_refs:
-                    return
-                processed_refs.add(ref_path)
-
-                if not ref_path.startswith("#/"):
-                    return
-
-                path_parts = ref_path[2:].split("/")
-                item_type = path_parts[0]
-                try:
-                    item_index = int(path_parts[1])
-                except (IndexError, ValueError):
-                    return
-
-                self.logger.debug(f"item_type: {item_type}")
-
-                items = doc_dict.get(item_type, [])
-                if item_index >= len(items):
-                    return
-                item = items[item_index]
-
-                # Get page number from the item's page reference
-                page_no = None
-                if "prov" in item:
-                    prov = item["prov"]
-                    if isinstance(prov, list) and len(prov) > 0:
-                        # Take the first page number from the prov list
-                        page_no = prov[0].get("page_no")
-                    elif isinstance(prov, dict) and "$ref" in prov:
-                        # Handle legacy reference format if needed
-                        page_path = prov["$ref"]
-                        page_index = int(page_path.split("/")[-1])
-                        pages = doc_dict.get("pages", [])
-                        if page_index < len(pages):
-                            page_no = pages[page_index].get("page_no")
-
-                # Create context for current item
-                current_context = {
-                    "ref": item.get("self_ref"),
-                    "label": item.get("label"),
-                    "level": item.get("level"),
-                    "parent_context": parent_context,
-                    "pageNum": page_no,  # Add page number to context
-                }
-
-                if item_type == "texts":
-                    ordered_items.append(
-                        {"text": item.get("text", ""), "context": current_context}
-                    )
-
-                children = item.get("children", [])
-                for child in children:
-                    process_item(child, level + 1, current_context)
-
-            # Start processing from body
-            body = doc_dict.get("body", {})
-            for child in body.get("children", []):
-                process_item(child)
-
-            # Extract text content from ordered items
-            text_content = "\n".join(
-                item["text"].strip() for item in ordered_items if item["text"].strip()
+            processor = DoclingProcessor(logger=self.logger, config=self.config_service)
+            block_containers = await processor.load_document(recordName, pptx_binary)
+            if block_containers is False:
+                raise Exception(("Failed to process PPTX document. It might contain scanned pages."))
+            record = await self.arango_service.get_document(
+                recordId, CollectionNames.RECORDS.value
             )
-
-            # Extract domain metadata
-            self.logger.info("🎯 Extracting domain metadata")
-            domain_metadata = None
-            if text_content:
-                try:
-                    metadata = await self.domain_extractor.extract_metadata(
-                        text_content, orgId
-                    )
-                    record = await self.domain_extractor.save_metadata_to_db(
-                        orgId, recordId, metadata, virtual_record_id
-                    )
-                    file = await self.arango_service.get_document(
-                        recordId, CollectionNames.FILES.value
-                    )
-                    domain_metadata = {**record, **file}
-
-                except Exception as e:
-                    self.logger.error(f"❌ Error extracting metadata: {str(e)}")
-                    domain_metadata = None
-
-            # Create numbered items with slide information
-            numbered_items = []
-            formatted_content = ""
-
-            for idx, item in enumerate(ordered_items, 1):
-                if item["text"].strip():
-                    context = item["context"]
-                    item_entry = {
-                        "number": idx,
-                        "content": item["text"].strip(),
-                        "type": context.get("label", "text"),
-                        "level": context.get("level"),
-                        "ref": context.get("ref"),
-                        "parent_ref": context.get("parent_context", {}).get("ref"),
-                        "pageNum": context.get("pageNum"),
-                    }
-                    numbered_items.append(item_entry)
-
-                    # Format with slide numbers
-                    slide_info = (
-                        f"[Slide {context.get('slide_number', '?')}] "
-                        if context.get("slide_number")
-                        else ""
-                    )
-                    formatted_content += f"{slide_info}[{idx}] {item['text'].strip()}\n"
-
-            # Create sentence data for indexing
-            self.logger.debug("📑 Creating semantic sentences")
-            sentence_data = []
-
-            # Keep track of previous items for context
-            context_window = []
-            context_window_size = 3  # Number of previous items to include for context
-
-            for idx, item in enumerate(ordered_items, 1):
-                if item["text"].strip():
-                    context = item["context"]
-
-                    # Create context text from previous items
-                    previous_context = " ".join(
-                        [prev["text"].strip() for prev in context_window]
-                    )
-
-                    # Current item's context with previous items
-                    full_context = {
-                        "previous": previous_context,
-                        "current": item["text"].strip(),
-                    }
-                    pageNum = context.get("pageNum")
-                    pageNum = int(pageNum) if pageNum else None
-
-                    sentence_data.append(
-                        {
-                            "text": item["text"].strip(),
-                            "metadata": {
-                                **(domain_metadata or {}),
-                                "recordId": recordId,
-                                "blockType": context.get("label", "text"),
-                                "blockNum": [idx],
-                                "blockText": json.dumps(full_context),
-                                "pageNum": [pageNum],
-                                "virtualRecordId": virtual_record_id,
-                            },
-                        }
-                    )
-
-                    # Update context window
-                    context_window.append(item)
-                    if len(context_window) > context_window_size:
-                        context_window.pop(0)
-
-            # Index sentences if available
-            if sentence_data:
-                self.logger.debug("📑 Indexing %s sentences", len(sentence_data))
-                pipeline = self.indexing_pipeline
-                await pipeline.index_documents(sentence_data)
-
-            # Prepare metadata
-            metadata = {
-                "recordId": recordId,
-                "recordName": recordName,
-                "orgId": orgId,
-                "version": version,
-                "source": source,
-                "domain_metadata": domain_metadata,
-                "document_info": {
-                    "schema_name": doc_dict.get("schema_name"),
-                    "version": doc_dict.get("version"),
-                    "name": doc_dict.get("name"),
-                    "origin": doc_dict.get("origin"),
-                },
-                "structure_info": {
-                    "text_count": len(doc_dict.get("texts", [])),
-                    "group_count": len(doc_dict.get("groups", [])),
-                    "picture_count": len(doc_dict.get("pictures", [])),
-                    "slide_count": len(
-                        set(
-                            item["context"].get("slide_number")
-                            for item in ordered_items
-                            if item["context"].get("slide_number")
-                        )
-                    ),
-                },
-            }
-
-            self.logger.info("✅ PPTX processing completed successfully")
-            return {
-                "pptx_result": {
-                    "items": numbered_items,
-                    "document_structure": {
-                        "body": doc_dict.get("body"),
-                        "groups": doc_dict.get("groups"),
-                    },
-                    "metadata": domain_metadata,
-                },
-                "formatted_content": formatted_content,
-                "numbered_items": numbered_items,
-                "metadata": metadata,
-            }
-
+            if record is None:
+                self.logger.error(f"❌ Record {recordId} not found in database")
+                raise Exception(f"Record {recordId} not found in graph db")
+            record = convert_record_dict_to_record(record)
+            record.block_containers = block_containers
+            record.virtual_record_id = virtual_record_id
+            ctx = TransformContext(record=record)
+            pipeline = IndexingPipeline(document_extraction=self.document_extraction, sink_orchestrator=self.sink_orchestrator)
+            await pipeline.apply(ctx)
+            self.logger.info("✅ PPTX processing completed successfully using docling")
+            return
         except Exception as e:
             self.logger.error(f"❌ Error processing PPTX document: {str(e)}")
             raise
@@ -2198,3 +1353,4 @@ class Processor:
         )
 
         return {"status": "success", "message": "PPT processed successfully"}
+

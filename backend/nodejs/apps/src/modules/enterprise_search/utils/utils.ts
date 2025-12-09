@@ -1,6 +1,7 @@
 import {
   AIServiceResponse,
   IAgentConversation,
+  IAIModel,
   IConversation,
   IConversationDocument,
   IMessage,
@@ -21,9 +22,24 @@ import {
   IAgentConversationDocument,
   AgentConversation,
 } from '../schema/agent.conversation.schema';
+import { Response } from 'express';
+import { Conversation } from '../schema/conversation.schema';
 
 const logger = new Logger({
   service: 'enterprise-search',
+});
+
+/**
+ * Extract model information from request body
+ */
+export const extractModelInfo = (
+  body: any,
+  defaultChatMode: string = 'quick',
+): IAIModel => ({
+  modelKey: body.modelKey || undefined,
+  modelName: body.modelName || undefined,
+  modelProvider: body.modelProvider || undefined,
+  chatMode: body.chatMode || defaultChatMode,
 });
 
 export const buildUserQueryMessage = (query: string): IMessage => ({
@@ -45,6 +61,7 @@ export const buildAIFailureResponseMessage = (): IMessage => ({
 export const buildAIResponseMessage = (
   aiResponse: AIServiceResponse<IAIResponse>,
   citations: ICitation[] = [],
+  modelInfo?: IAIModel,
 ): IMessage => {
   if (!aiResponse?.data?.answer) {
     throw new InternalServerError('AI response must include an answer');
@@ -72,6 +89,7 @@ export const buildAIResponseMessage = (
       aiTransactionId: aiResponse.data.metadata?.aiTransactionId,
       reason: aiResponse.data?.reason,
     },
+    modelInfo: modelInfo,
   };
 };
 
@@ -480,6 +498,7 @@ export const buildConversationResponse = (
           citationData: citation.citationId,
         })) || [],
     })),
+    modelInfo: conversation.modelInfo,
     pagination: {
       page,
       limit,
@@ -508,6 +527,7 @@ export const saveCompleteConversation = async (
   completeData: IAIResponse,
   orgId: string,
   session?: ClientSession | null,
+  modelInfo?: IAIModel,
 ): Promise<any> => {
   try {
     // Save citations first
@@ -530,6 +550,7 @@ export const saveCompleteConversation = async (
     const aiResponseMessage = buildAIResponseMessage(
       { data: completeData, statusCode: 200 },
       citations,
+      modelInfo,
     ) as IMessageDocument;
 
     // Update conversation
@@ -574,18 +595,55 @@ export const saveCompleteConversation = async (
 };
 
 // Helper function to mark conversation as failed
+// Helper function to add error to conversation errors array
+export const addErrorToConversation = (
+  conversation: IConversationDocument | IAgentConversationDocument,
+  errorMessage: string,
+  errorType?: string,
+  messageId?: mongoose.Types.ObjectId,
+  stack?: string,
+  metadata?: Map<string, any>,
+): void => {
+  if (!conversation.conversationErrors) {
+    conversation.conversationErrors = [];
+  }
+  conversation.conversationErrors.push({
+    message: errorMessage,
+    errorType: errorType || 'unknown',
+    timestamp: new Date(),
+    messageId,
+    stack,
+    metadata,
+  });
+};
+
 export const markConversationFailed = async (
   conversation: IConversationDocument,
   failReason: string,
   session?: ClientSession | null,
+  errorType?: string,
+  stack?: string,
+  metadata?: Map<string, any>,
 ): Promise<void> => {
   try {
     conversation.status = CONVERSATION_STATUS.FAILED;
     conversation.failReason = failReason;
     conversation.lastActivityAt = Date.now();
 
+    // Add error to errors array
+    addErrorToConversation(
+      conversation,
+      failReason,
+      errorType,
+      undefined,
+      stack,
+      metadata,
+    );
+
     // Add failure message
     const failedMessage = buildAIFailureResponseMessage() as IMessageDocument;
+    // Update the error message content with the exact error
+    failedMessage.content = failReason;
     conversation.messages.push(failedMessage);
 
     // Save failed conversation
@@ -614,6 +672,77 @@ export const markConversationFailed = async (
 };
 
 /**
+ * Replace a message at a specific index with an error message (used for regeneration)
+ */
+export const replaceMessageWithError = async (
+  conversation: IConversationDocument | IAgentConversationDocument,
+  messageIndex: number,
+  errorMessage: string,
+  session?: ClientSession | null,
+  errorType?: string,
+  stack?: string,
+  metadata?: Map<string, any>,
+): Promise<void> => {
+  try {
+    if (messageIndex < 0 || messageIndex >= conversation.messages.length) {
+      throw new InternalServerError(
+        'Invalid message index for error replacement',
+      );
+    }
+
+    conversation.status = CONVERSATION_STATUS.FAILED;
+    conversation.failReason = errorMessage;
+    conversation.lastActivityAt = Date.now();
+
+    // Add error to errors array
+    const originalMessage = conversation.messages[
+      messageIndex
+    ] as IMessageDocument;
+    addErrorToConversation(
+      conversation,
+      errorMessage,
+      errorType,
+      originalMessage._id as mongoose.Types.ObjectId,
+      stack,
+      metadata,
+    );
+
+    // Replace the message at the specified index with error message
+    const failedMessage = buildAIFailureResponseMessage() as IMessageDocument;
+    failedMessage.content = errorMessage;
+    // Preserve the original message ID
+    failedMessage._id = originalMessage._id;
+    conversation.messages[messageIndex] = failedMessage;
+
+    // Save updated conversation
+    const savedWithError = session
+      ? await conversation.save({ session })
+      : await conversation.save();
+
+    if (!savedWithError) {
+      logger.error('Failed to replace message with error', {
+        conversationId: conversation._id,
+        messageIndex,
+        errorMessage,
+      });
+    }
+
+    logger.debug('Message replaced with error', {
+      conversationId: conversation._id,
+      messageIndex,
+      errorMessage,
+    });
+  } catch (error: any) {
+    logger.error('Error replacing message with error', {
+      conversationId: conversation._id,
+      messageIndex,
+      error: error.message,
+    });
+    throw error;
+  }
+};
+
+/**
  * Save complete agent conversation data to database
  */
 export const saveCompleteAgentConversation = async (
@@ -621,6 +750,7 @@ export const saveCompleteAgentConversation = async (
   completeData: IAIResponse,
   orgId: string,
   session?: ClientSession | null,
+  modelInfo?: IAIModel,
 ): Promise<any> => {
   try {
     // Save citations first
@@ -643,6 +773,7 @@ export const saveCompleteAgentConversation = async (
     const aiResponseMessage = buildAIResponseMessage(
       { data: completeData, statusCode: 200 },
       citations,
+      modelInfo,
     ) as IMessageDocument;
 
     // Update conversation
@@ -695,11 +826,23 @@ export const markAgentConversationFailed = async (
   conversation: IAgentConversationDocument,
   failReason: string,
   session?: ClientSession | null,
+  errorType?: string,
+  stack?: string,
+  metadata?: Map<string, any>,
 ): Promise<void> => {
   try {
     conversation.status = CONVERSATION_STATUS.FAILED;
     conversation.failReason = failReason;
     conversation.lastActivityAt = Date.now();
+
+    addErrorToConversation(
+      conversation,
+      failReason,
+      errorType,
+      undefined,
+      stack,
+      metadata,
+    );
 
     // Add failure message
     const failedMessage = buildAIFailureResponseMessage() as IMessageDocument;
@@ -1127,5 +1270,343 @@ export const deleteAgentConversation = async (
       error: error.message,
     });
     throw error;
+  }
+};
+
+/**
+ * Initialize SSE response headers and send connection event
+ */
+export const initializeSSEResponse = (res: Response): void => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'X-Accel-Buffering': 'no',
+  });
+
+  res.write(
+    `event: connected\ndata: ${JSON.stringify({ message: 'SSE connection established' })}\n\n`,
+  );
+  (res as any).flush?.();
+};
+
+/**
+ * Send error event to client with optional updated conversation
+ */
+export const sendSSEErrorEvent = async (
+  res: Response,
+  errorMessage: string,
+  details?: string,
+  conversation?: any,
+): Promise<void> => {
+  const errorData: any = {
+    error: errorMessage,
+  };
+
+  if (details) {
+    errorData.details = details;
+  }
+
+  if (conversation) {
+    errorData.conversation = conversation;
+  }
+
+  res.write(`event: error\ndata: ${JSON.stringify(errorData)}\n\n`);
+};
+
+/**
+ * Send complete event to client with conversation data
+ */
+export const sendSSECompleteEvent = (
+  res: Response,
+  conversation: any,
+  recordsUsed: number,
+  requestId: string,
+  startTime: number,
+): void => {
+  const responsePayload = {
+    conversation,
+    recordsUsed,
+    meta: {
+      requestId,
+      timestamp: new Date().toISOString(),
+      duration: Date.now() - startTime,
+      recordsUsed,
+    },
+  };
+
+  res.write(`event: complete\ndata: ${JSON.stringify(responsePayload)}\n\n`);
+};
+
+/**
+ * Handle regeneration stream data events
+ */
+export const handleRegenerationStreamData = (
+  chunk: Buffer,
+  buffer: string,
+  existingConversation: IConversationDocument | null,
+  messageIndex: number,
+  session: ClientSession | null,
+  requestId: string,
+  res: Response,
+  onCompleteData: (data: IAIResponse) => void,
+): string => {
+  const chunkStr = chunk.toString();
+  let newBuffer = buffer + chunkStr;
+
+  const events = newBuffer.split('\n\n');
+  newBuffer = events.pop() || '';
+
+  let filteredChunk = '';
+
+  for (const event of events) {
+    if (event.trim()) {
+      const lines = event.split('\n');
+      const eventType = lines
+        .find((line) => line.startsWith('event:'))
+        ?.replace('event:', '')
+        .trim();
+      const dataLines = lines
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.replace(/^data: ?/, ''));
+      const dataLine = dataLines.join('\n');
+
+      if (eventType === 'complete' && dataLine) {
+        try {
+          const completeData = JSON.parse(dataLine);
+          onCompleteData(completeData);
+        } catch (parseError: any) {
+          logger.error('Failed to parse complete event data', {
+            requestId,
+            parseError: parseError.message,
+            dataLine,
+          });
+          filteredChunk += event + '\n\n';
+        }
+      } else if (eventType === 'error' && dataLine) {
+        try {
+          const errorData = JSON.parse(dataLine);
+          if (existingConversation && messageIndex >= 0) {
+            const errorMessage =
+              errorData.error || errorData.message || 'Unknown error occurred';
+            replaceMessageWithError(
+              existingConversation,
+              messageIndex,
+              errorMessage,
+              session,
+              'streaming_error',
+              errorData.stack,
+              errorData.metadata
+                ? new Map(Object.entries(errorData.metadata))
+                : undefined,
+            ).catch((err) => {
+              logger.error('Failed to replace message with error', {
+                requestId,
+                error: err.message,
+              });
+            });
+          }
+          filteredChunk += event + '\n\n';
+        } catch (parseError: any) {
+          logger.error('Failed to parse error event data', {
+            requestId,
+            parseError: parseError.message,
+            dataLine,
+          });
+          if (existingConversation && messageIndex >= 0) {
+            const errorMessage = `Failed to parse error event: ${parseError.message}`;
+            replaceMessageWithError(
+              existingConversation,
+              messageIndex,
+              errorMessage,
+              session,
+              'parse_error',
+              parseError.stack,
+            ).catch((err) => {
+              logger.error('Failed to replace message with error', {
+                requestId,
+                error: err.message,
+              });
+            });
+          }
+          filteredChunk += event + '\n\n';
+        }
+      } else {
+        filteredChunk += event + '\n\n';
+      }
+    }
+  }
+
+  if (filteredChunk) {
+    res.write(filteredChunk);
+    (res as any).flush?.();
+  }
+
+  return newBuffer;
+};
+
+/**
+ * Handle successful regeneration completion
+ */
+export const handleRegenerationSuccess = async (
+  completeData: IAIResponse,
+  existingConversation: IConversationDocument | IAgentConversationDocument,
+  messageIndex: number,
+  orgId: string,
+  session: ClientSession | null,
+  modelInfo?: IAIModel,
+): Promise<{
+  conversation: any;
+  savedCitations: ICitation[];
+}> => {
+  // Create and save citations
+  const savedCitations: ICitation[] = await Promise.all(
+    completeData.citations?.map(async (citation: ICitation) => {
+      const newCitation = new Citation({
+        content: citation.content,
+        chunkIndex: citation.chunkIndex ?? 0,
+        citationType: citation.citationType,
+        metadata: {
+          ...citation.metadata,
+          orgId,
+        },
+      });
+      return session ? newCitation.save({ session }) : newCitation.save();
+    }) || [],
+  );
+
+  // Build AI response message
+  const aiResponseMessage = buildAIResponseMessage(
+    { statusCode: 200, data: completeData },
+    savedCitations,
+    modelInfo,
+  ) as IMessageDocument;
+
+  // Preserve the original message ID
+  const originalMessage = existingConversation.messages[
+    messageIndex
+  ] as IMessageDocument;
+  aiResponseMessage._id = originalMessage._id;
+
+  if (modelInfo) {
+    const fieldsToUpdate: Array<keyof IAIModel> = [
+      'modelKey',
+      'modelName',
+      'modelProvider',
+      'chatMode',
+    ];
+    for (const field of fieldsToUpdate) {
+      const value = modelInfo[field];
+      if (value !== undefined && value !== null) {
+        (existingConversation.modelInfo as IAIModel)[field] = value;
+      }
+    }
+  }
+
+  // Update the conversation with the new message at the same index
+  existingConversation.messages[messageIndex] = aiResponseMessage;
+  existingConversation.lastActivityAt = Date.now();
+  existingConversation.status = CONVERSATION_STATUS.COMPLETE;
+
+  // Save the updated conversation
+  const updatedConversation = session
+    ? await existingConversation.save({ session })
+    : await existingConversation.save();
+
+  if (!updatedConversation) {
+    throw new InternalServerError(
+      'Failed to update conversation with regenerated response',
+    );
+  }
+
+  // Format response conversation
+  const plainConversation = updatedConversation.toObject();
+  const responseConversation = {
+    ...plainConversation,
+    messages: plainConversation.messages.map(
+      (message: IMessage, idx: number) => {
+        if (idx === messageIndex) {
+          return {
+            ...message,
+            citations:
+              message.citations?.map((citation: IMessageCitation) => ({
+                ...citation,
+                citationData: savedCitations.find(
+                  (c) =>
+                    (c as mongoose.Document).id.toString() ===
+                    citation.citationId?.toString(),
+                ),
+              })) || [],
+          };
+        }
+        return message;
+      },
+    ),
+  };
+
+  return {
+    conversation: responseConversation,
+    savedCitations,
+  };
+};
+
+/**
+ * Handle regeneration error and send error event
+ */
+export const handleRegenerationError = async (
+  res: Response,
+  error: Error | any,
+  existingConversation: IConversationDocument | IAgentConversationDocument | null,
+  messageIndex: number,
+  conversationId: string,
+  session: ClientSession | null,
+  requestId: string,
+  errorType: string = 'regeneration_error',
+): Promise<void> => {
+  const errorMessage = error.message || 'Unknown error occurred';
+
+  if (existingConversation && messageIndex >= 0) {
+    try {
+      await replaceMessageWithError(
+        existingConversation,
+        messageIndex,
+        errorMessage,
+        session,
+        errorType,
+        error.stack,
+      );
+
+      // Determine the model type from the conversation object itself
+      // Check if it's an AgentConversation by looking for agentKey property
+      // or by checking the constructor
+      const isAgentConversation =
+        'agentKey' in existingConversation ||
+        existingConversation.constructor === AgentConversation;
+
+      // Reload conversation to get updated state using the appropriate model
+      const updatedConversation = isAgentConversation
+        ? await AgentConversation.findById(conversationId)
+        : await Conversation.findById(conversationId);
+      if (updatedConversation) {
+        const plainConversation = updatedConversation.toObject();
+        await sendSSEErrorEvent(
+          res,
+          errorMessage,
+          error.message,
+          plainConversation,
+        );
+      } else {
+        await sendSSEErrorEvent(res, errorMessage, error.message);
+      }
+    } catch (replaceError: any) {
+      logger.error('Failed to replace message with error', {
+        requestId,
+        error: replaceError.message,
+      });
+      await sendSSEErrorEvent(res, errorMessage, error.message);
+    }
+  } else {
+    await sendSSEErrorEvent(res, errorMessage, error.message);
   }
 };

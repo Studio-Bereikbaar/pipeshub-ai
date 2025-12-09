@@ -49,6 +49,8 @@ export interface DocumentContent {
   citationType: string;
   metadata: DocumentMetadata;
   chunkIndex?: number;
+  citationId?: string;
+  id?: string;
 }
 
 export interface AggregatedDocument {
@@ -89,6 +91,8 @@ export interface SearchResult {
   score: number;
   citationType: string;
   metadata: DocumentMetadata;
+  citationId?: string;
+  id?: string;
 }
 
 export interface SearchResponse {
@@ -110,6 +114,7 @@ export interface SearchFilters {
 export interface KnowledgeSearchProps {
   searchResults: SearchResult[];
   loading: boolean;
+  canLoadMore: boolean;
   onSearchQueryChange: (query: string) => void;
   onTopKChange: (callback: (prevTopK: number) => number) => void;
   onViewCitations: (recordId: string, extension: string, recordCitation?: SearchResult) => Promise<void>;

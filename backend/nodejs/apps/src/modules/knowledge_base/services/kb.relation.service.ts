@@ -35,11 +35,7 @@ import {
   ReindexAllRecordEvent,
   SyncEventProducer,
   Event as SyncEvent,
-  EventType as SyncEventType,
-  SyncDriveEvent,
-  SyncGmailEvent,
-  SyncOneDriveEvent,
-  SyncSharePointOnlineEvent,
+  BaseSyncEvent,
 } from './sync_events.service';
 import {
   IServiceFileRecord,
@@ -2744,24 +2740,31 @@ export class RecordRelationService {
 
   async reindexAllRecords(reindexPayload: any): Promise<any> {
     try {
-      const reindexAllRecordEventPayload =
-        await this.createReindexAllRecordEventPayload(reindexPayload);
+      const connectorNormalized = reindexPayload.app
+        .replace(/\s+/g, '')
+        .toLowerCase();
+      
+      const eventType = `${connectorNormalized}.reindex`;
+      
+      const payload = {
+        orgId: reindexPayload.orgId,
+        statusFilters: ['FAILED'],
+      };
 
       const event: SyncEvent = {
-        eventType: SyncEventType.ReindexAllRecordEvent,
+        eventType: eventType,
         timestamp: Date.now(),
-        payload: reindexAllRecordEventPayload,
+        payload: payload,
       };
 
       await this.syncEventProducer.publishEvent(event);
-      logger.info(`Published reindex all record for app ${reindexPayload.app}`);
+      logger.info(`Published ${eventType} event for app ${reindexPayload.app}`);
 
       return { success: true };
     } catch (eventError: any) {
       logger.error('Failed to publish reindex record event', {
         error: eventError,
       });
-      // Don't throw the error to avoid affecting the main operation
       return { success: false, error: eventError.message };
     }
   }
@@ -2781,26 +2784,13 @@ export class RecordRelationService {
 
   async resyncConnectorRecords(resyncConnectorPayload: any): Promise<any> {
     try {
-      const resyncConnectorEventPayload =
+      const resyncPayload =
         await this.createResyncConnectorEventPayload(resyncConnectorPayload);
-
+      const eventType = resyncPayload.connector.replace(' ', '').toLowerCase() + '.resync';
       const event: SyncEvent = {
-        eventType:
-          (() => {
-            switch (resyncConnectorEventPayload.connector) {
-              case 'GMAIL':
-                return SyncEventType.SyncGmailEvent;
-              case 'ONEDRIVE':
-                return SyncEventType.SyncOneDriveEvent;
-              case 'SHAREPOINT ONLINE':
-                return SyncEventType.SyncSharePointOnlineEvent;
-              default:
-                return SyncEventType.SyncDriveEvent;
-            }
-          })()
-        ,
+        eventType: eventType,
         timestamp: Date.now(),
-        payload: resyncConnectorEventPayload,
+        payload: resyncPayload,
       };
 
       await this.syncEventProducer.publishEvent(event);
@@ -2820,7 +2810,7 @@ export class RecordRelationService {
 
   async createResyncConnectorEventPayload(
     resyncConnectorEventPayload: any,
-  ): Promise<SyncDriveEvent | SyncGmailEvent | SyncOneDriveEvent | SyncSharePointOnlineEvent> {
+  ): Promise<BaseSyncEvent> {
     const connectorName = resyncConnectorEventPayload.connectorName;
 
     return {

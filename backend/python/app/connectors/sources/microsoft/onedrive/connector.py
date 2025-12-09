@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from msgraph import GraphServiceClient
 from msgraph.generated.models.drive_item import DriveItem
+from msgraph.generated.models.group import Group
 from msgraph.generated.models.subscription import Subscription
 
 from app.config.configuration_service import ConfigurationService
@@ -26,6 +27,11 @@ from app.connectors.core.base.sync_point.sync_point import (
     SyncPoint,
     generate_record_sync_point_key,
 )
+from app.connectors.core.registry.connector_builder import (
+    AuthField,
+    ConnectorBuilder,
+    DocumentationLink,
+)
 from app.connectors.sources.microsoft.common.apps import OneDriveApp
 from app.connectors.sources.microsoft.common.msgraph_client import (
     MSGraphClient,
@@ -34,13 +40,15 @@ from app.connectors.sources.microsoft.common.msgraph_client import (
 )
 from app.models.entities import (
     AppUser,
+    AppUserGroup,
     FileRecord,
     Record,
     RecordGroupType,
     RecordType,
 )
-from app.models.permission import EntityType, Permission, PermissionType
+from app.models.permission import EntityType, Permission
 from app.utils.streaming import stream_content
+from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 
 @dataclass
@@ -50,6 +58,66 @@ class OneDriveCredentials:
     client_secret: str
     has_admin_consent: bool = False
 
+@ConnectorBuilder("OneDrive")\
+    .in_group("Microsoft 365")\
+    .with_auth_type("OAUTH_ADMIN_CONSENT")\
+    .with_description("Sync files and folders from OneDrive")\
+    .with_categories(["Storage"])\
+    .configure(lambda builder: builder
+        .with_icon("/assets/icons/connectors/onedrive.svg")
+        .add_documentation_link(DocumentationLink(
+            "Azure AD App Registration Setup",
+            "https://docs.microsoft.com/en-us/azure/active-directory/develop/quickstart-register-app",
+            "setup"
+        ))
+        .add_documentation_link(DocumentationLink(
+            'Pipeshub Documentation',
+            'https://docs.pipeshub.com/connectors/microsoft-365/one-drive',
+            'pipeshub'
+        ))
+        .with_redirect_uri("connectors/oauth/callback/OneDrive", False)
+        .add_auth_field(AuthField(
+            name="clientId",
+            display_name="Application (Client) ID",
+            placeholder="Enter your Azure AD Application ID",
+            description="The Application (Client) ID from Azure AD App Registration"
+        ))
+        .add_auth_field(AuthField(
+            name="clientSecret",
+            display_name="Client Secret",
+            placeholder="Enter your Azure AD Client Secret",
+            description="The Client Secret from Azure AD App Registration",
+            field_type="PASSWORD",
+            is_secret=True
+        ))
+        .add_auth_field(AuthField(
+            name="tenantId",
+            display_name="Directory (Tenant) ID",
+            placeholder="Enter your Azure AD Tenant ID",
+            description="The Directory (Tenant) ID from Azure AD"
+        ))
+        .add_auth_field(AuthField(
+            name="hasAdminConsent",
+            display_name="Has Admin Consent",
+            description="Check if admin consent has been granted for the application",
+            field_type="CHECKBOX",
+            required=True,
+            default_value=False
+        ))
+        .add_auth_field(AuthField(
+            name="redirectUri",
+            display_name="Redirect URI",
+            placeholder="http://localhost:3001/connectors/oauth/callback/onedrive",
+            description="The redirect URI for OAuth authentication",
+            field_type="URL",
+            required=False,
+            max_length=2000
+        ))
+        .add_conditional_display("redirectUri", "hasAdminConsent", "equals", False)
+        .with_sync_strategies(["SCHEDULED", "MANUAL"])
+        .with_scheduled_config(True, 60)
+    )\
+    .build_decorator()
 class OneDriveConnector(BaseConnector):
     def __init__(self, logger: Logger, data_entities_processor: DataSourceEntitiesProcessor,
         data_store_provider: DataStoreProvider, config_service: ConfigurationService) -> None:
@@ -83,7 +151,7 @@ class OneDriveConnector(BaseConnector):
         if not config:
             self.logger.error("OneDrive config not found")
             raise ValueError("OneDrive config not found")
-        auth_config = config.get("auth", {}).get("values", {})
+        auth_config = config.get("auth", {})
         tenant_id = auth_config.get("tenantId")
         client_id = auth_config.get("clientId")
         client_secret = auth_config.get("clientSecret")
@@ -99,12 +167,25 @@ class OneDriveConnector(BaseConnector):
             has_admin_consent=has_admin_consent,
         )
          # Initialize MS Graph client
-        credential = ClientSecretCredential(
+        # Store credential as instance variable to prevent it from being garbage collected
+        # Initialize the credential and ensure it's kept open by calling get_token
+        # This prevents premature closure of the HTTP transport
+        self.credential = ClientSecretCredential(
             tenant_id=credentials.tenant_id,
             client_id=credentials.client_id,
             client_secret=credentials.client_secret,
         )
-        self.client = GraphServiceClient(credential, scopes=["https://graph.microsoft.com/.default"])
+
+        # Pre-initialize the credential to establish HTTP session
+        # This prevents "HTTP transport has already been closed" errors
+        try:
+            await self.credential.get_token("https://graph.microsoft.com/.default")
+            self.logger.info("✅ Credential initialized and HTTP session established")
+        except Exception as token_error:
+            self.logger.error(f"❌ Failed to initialize credential: {token_error}")
+            raise ValueError(f"Failed to initialize OneDrive credential: {token_error}")
+
+        self.client = GraphServiceClient(self.credential, scopes=["https://graph.microsoft.com/.default"])
         self.msgraph_client = MSGraphClient(self.connector_name, self.client, self.logger)
         return True
 
@@ -136,9 +217,12 @@ class OneDriveConnector(BaseConnector):
             # Get existing record if any
             async with self.data_store_provider.transaction() as tx_store:
                 existing_record = await tx_store.get_record_by_external_id(
-                connector_name=self.connector_name,
-                external_id=item.id
-            )
+                    connector_name=self.connector_name,
+                    external_id=item.id
+                )
+                if existing_record:
+                    existing_file_record = await tx_store.get_file_record_by_id(existing_record.id)
+
 
             # Detect changes
             is_new = existing_record is None
@@ -146,6 +230,11 @@ class OneDriveConnector(BaseConnector):
             metadata_changed = False
             content_changed = False
             permissions_changed = False
+            is_shared_folder = False
+            is_shared_folder = (
+                item.folder is not None and  # It's a folder
+                hasattr(item, 'shared') and item.shared is not None  # Has shared property
+            )
 
             if existing_record:
                 # Check for metadata changes
@@ -155,12 +244,14 @@ class OneDriveConnector(BaseConnector):
                     metadata_changed = True
                     is_updated = True
 
-                # Check for content changes (different hash)
-                if item.file and hasattr(item.file, 'hashes'):
-                    current_hash = item.file.hashes.quick_xor_hash if item.file.hashes else None
-                    if existing_record.quick_xor_hash != current_hash:
-                        content_changed = True
-                        is_updated = True
+
+                if existing_file_record:
+                    # Check for content changes (different hash)
+                    if item.file and hasattr(item.file, 'hashes'):
+                        current_hash = item.file.hashes.quick_xor_hash if item.file.hashes else None
+                        if existing_file_record.quick_xor_hash != current_hash:
+                            content_changed = True
+                            is_updated = True
 
             # Create/update file record
             signed_url = None
@@ -187,7 +278,8 @@ class OneDriveConnector(BaseConnector):
                 source_updated_at=int(item.last_modified_date_time.timestamp() * 1000),
                 weburl=item.web_url,
                 signed_url=signed_url,
-                mime_type=MimeTypes(item.file.mime_type) if item.file else MimeTypes.FOLDER,
+                is_shared=is_shared_folder,
+                mime_type=item.file.mime_type if item.file else MimeTypes.FOLDER.value,
                 parent_external_record_id=item.parent_reference.id if item.parent_reference else None,
                 external_record_group_id=item.parent_reference.drive_id if item.parent_reference else None,
                 size_in_bytes=item.size,
@@ -211,6 +303,20 @@ class OneDriveConnector(BaseConnector):
             )
 
             new_permissions = await self._convert_to_permissions(permission_result)
+
+            if existing_record:
+                # compare permissions with existing permissions (To be implemented)
+                if new_permissions:
+                    permissions_changed = True
+                    is_updated = True
+
+            if existing_record and existing_record.is_shared != is_shared_folder:
+                metadata_changed = True
+                is_updated = True
+                await self._update_folder_children_permissions(
+                    drive_id=item.parent_reference.drive_id,
+                        folder_id=item.id
+                    )
 
 
             return RecordUpdate(
@@ -236,22 +342,32 @@ class OneDriveConnector(BaseConnector):
         """
         permissions = []
 
+
         for perm in msgraph_permissions:
             try:
                 # Handle user permissions
-                if hasattr(perm, 'granted_to') and perm.granted_to:
-                    if hasattr(perm.granted_to, 'user') and perm.granted_to.user:
-                        user = perm.granted_to.user
+                if hasattr(perm, 'granted_to_v2') and perm.granted_to_v2:
+                    if hasattr(perm.granted_to_v2, 'user') and perm.granted_to_v2.user:
+                        user = perm.granted_to_v2.user
                         permissions.append(Permission(
                             external_id=user.id,
                             email=user.additional_data.get("email", None) if hasattr(user, 'additional_data') else None,
                             type=map_msgraph_role_to_permission_type(perm.roles[0] if perm.roles else "read"),
                             entity_type=EntityType.USER
                         ))
+                    if hasattr(perm.granted_to_v2, 'group') and perm.granted_to_v2.group:
+                        group = perm.granted_to_v2.group
+                        permissions.append(Permission(
+                            external_id=group.id,
+                            email=group.additional_data.get("email", None) if hasattr(group, 'additional_data') else None,
+                            type=map_msgraph_role_to_permission_type(perm.roles[0] if perm.roles else "read"),
+                            entity_type=EntityType.GROUP
+                        ))
+
 
                 # Handle group permissions
-                if hasattr(perm, 'granted_to_identities') and perm.granted_to_identities:
-                    for identity in perm.granted_to_identities:
+                if hasattr(perm, 'granted_to_identities_v2') and perm.granted_to_identities_v2:
+                    for identity in perm.granted_to_identities_v2:
                         if hasattr(identity, 'group') and identity.group:
                             group = identity.group
                             permissions.append(Permission(
@@ -332,6 +448,65 @@ class OneDriveConnector(BaseConnector):
                 self.logger.error(f"❌ Error processing item in generator: {e}", exc_info=True)
                 continue
 
+    async def _update_folder_children_permissions(
+        self,
+        drive_id: str,
+        folder_id: str,
+        inherited_permissions: Optional[List[Permission]] = None
+    ) -> None:
+        """
+        Recursively update permissions for all children of a folder.
+
+        Args:
+            drive_id: The drive ID
+            folder_id: The folder ID whose children need permission updates
+            inherited_permissions: The permissions to apply to children
+        """
+        try:
+            # Get all children of this folder
+            children = await self.msgraph_client.list_folder_children(drive_id, folder_id)
+
+            for child in children:
+                try:
+                    # Get the child's current permissions
+                    child_permissions = await self.msgraph_client.get_file_permission(
+                        drive_id,
+                        child.id
+                    )
+
+                    # Convert to our permission model
+                    converted_permissions = await self._convert_to_permissions(child_permissions)
+
+                    # Update the child's permissions in database
+                    async with self.data_store_provider.transaction() as tx_store:
+                        existing_child_record = await tx_store.get_record_by_external_id(
+                            connector_name=self.connector_name,
+                            external_id=child.id
+                        )
+
+                        if existing_child_record:
+                            # Update the record with new permissions
+                            await self.data_entities_processor.on_updated_record_permissions(
+                                record=existing_child_record,
+                                permissions=converted_permissions
+                            )
+                            self.logger.info(f"Updated permissions for child item {child.id}")
+
+                    # If this child is also a folder, recurse
+                    if child.folder is not None:
+                        await self._update_folder_children_permissions(
+                            drive_id=drive_id,
+                            folder_id=child.id
+                            # inherited_permissions=converted_permissions
+                        )
+
+                except Exception as child_ex:
+                    self.logger.error(f"Error updating child {child.id}: {child_ex}", exc_info=True)
+                    continue
+
+        except Exception as ex:
+            self.logger.error(f"Error updating folder children permissions for {folder_id}: {ex}", exc_info=True)
+
     async def _handle_record_updates(self, record_update: RecordUpdate) -> None:
         """
         Handle different types of record updates (new, updated, deleted).
@@ -350,10 +525,6 @@ class OneDriveConnector(BaseConnector):
 
             elif record_update.is_updated:
                 # Handle updates based on what changed
-                if record_update.content_changed:
-                    self.logger.info(f"Content changed for record: {record_update.record.record_name}")
-                    await self.data_entities_processor.on_record_content_update(record_update.record)
-
                 if record_update.metadata_changed:
                     self.logger.info(f"Metadata changed for record: {record_update.record.record_name}")
                     await self.data_entities_processor.on_record_metadata_update(record_update.record)
@@ -365,50 +536,169 @@ class OneDriveConnector(BaseConnector):
                         record_update.new_permissions
                     )
 
+                if record_update.content_changed:
+                    self.logger.info(f"Content changed for record: {record_update.record.record_name}")
+                    await self.data_entities_processor.on_record_content_update(record_update.record)
+
         except Exception as e:
             self.logger.error(f"❌ Error handling record updates: {e}", exc_info=True)
 
     async def _sync_user_groups(self) -> None:
         """
-        Sync user groups and their members.
+        Unified user group synchronization.
+        Uses Graph Delta API for BOTH initial full sync and subsequent incremental syncs.
         """
         try:
-            self.logger.info("Starting user group synchronization")
+            sync_point_key = generate_record_sync_point_key(
+                SyncDataPointType.GROUPS.value,
+                "organization",
+                self.data_entities_processor.org_id
+            )
+            sync_point = await self.user_group_sync_point.read_sync_point(sync_point_key)
 
-            # Get all groups
-            user_groups = await self.msgraph_client.get_all_user_groups()
+            # 1. Determine starting URL
+            # Default to fresh delta start
+            url = "https://graph.microsoft.com/v1.0/groups/delta"
+            # If we have a saved state, prefer nextLink (resuming interrupted sync) or deltaLink (incremental sync)
+            if sync_point:
+                 url = sync_point.get('nextLink') or sync_point.get('deltaLink') or url
 
-            # Process each group with its members
-            for group in user_groups:
-                try:
-                    # Get group members
-                    member_ids = await self.msgraph_client.get_group_members(group.source_user_group_id)
+            self.logger.info("Starting user group sync...")
 
-                    # Create permissions for group members
-                    member_permissions = []
-                    for member_id in member_ids:
-                        member_permissions.append(Permission(
-                            external_id=member_id,
-                            email=None,
-                            type=PermissionType.READ,
-                            entity_type=EntityType.USER
-                        ))
+            while True:
+                # 2. Fetch page of results
+                result = await self.msgraph_client.get_groups_delta_response(url)
+                groups = result.get('groups', [])
 
-                    # Send group with permissions to processor
-                    await self.data_entities_processor.on_new_user_groups(
-                        [group],
-                        member_permissions
+                self.logger.info(f"Fetched page with {len(groups)} groups")
+
+                # 3. Process each group in the current page
+                for group in groups:
+                    # A) Check for DELETION marker
+                    if hasattr(group, 'additional_data') and group.additional_data and '@removed' in group.additional_data:
+                         self.logger.info(f"[DELTA ACTION] 🗑️ REMOVE Group: {group.id}")
+                         await self.handle_delete_group(group.id)
+                         continue
+
+
+                    # B) Process ADD/UPDATE
+                    # Note: For a brand new initial sync, everything will fall into this bucket.
+                    self.logger.info(f"[DELTA ACTION] ✅ ADD/UPDATE Group: {getattr(group, 'display_name', 'N/A')} ({group.id})")
+                    await self.handle_group_create(group)
+
+                    # C) Trigger member sync for this group
+                    # C) Check for specific MEMBER changes in this delta
+                    member_changes = group.additional_data.get('members@delta', [])
+
+                    if member_changes:
+                         self.logger.info(f"    -> [ACTION] 👥 Processing {len(member_changes)} member changes for group: {group.id}")
+
+                    for member_change in member_changes:
+                        user_id = member_change.get('id')
+
+                        # 1. Fetch email (needed for both add and remove in your current processor)
+                        email = await self.msgraph_client.get_user_email(user_id)
+
+                        if not email:
+                            self.logger.warning(f"Could not find email for user ID {user_id}, skipping member change processing.")
+                            continue
+
+                        # 2. Handle based on change type
+                        if '@removed' in member_change:
+                            self.logger.info(f"    -> [ACTION] 👤⛔ REMOVING member: {email} ({user_id}) from group {group.id}")
+                            await self.data_entities_processor.on_user_group_member_removed(
+                                external_group_id=group.id,
+                                user_email=email,
+                                connector_name=self.connector_name
+                            )
+                        else:
+                            self.logger.info(f"    -> [ACTION] 👤✨ ADDING member: {email} ({user_id}) to group {group.id}")
+
+                # 4. Handle pagination and completion
+                if result.get('next_link'):
+                    # More data available, update URL for next loop iteration
+                    url = result.get('next_link')
+
+                    # OPTIONAL: Save intermediate 'nextLink' here if you want resumability during a very long initial sync.
+                    # await self.user_group_sync_point.update_sync_point(sync_point_key, {"nextLink": url, "deltaLink": None})
+
+                elif result.get('delta_link'):
+                    # End of current data stream. Save the delta_link for the NEXT run.
+                    await self.user_group_sync_point.update_sync_point(
+                        sync_point_key,
+                        {"nextLink": None, "deltaLink": result.get('delta_link')}
                     )
-
-                except Exception as e:
-                    self.logger.error(f"❌ Error processing group {group.name}: {e}", exc_info=True)
-                    continue
-
-            self.logger.info(f"Processed {len(user_groups)} user groups")
+                    self.logger.info("User group sync cycle completed, delta link saved for next run.")
+                    break
+                else:
+                    # Fallback ensuring loop terminates if API returns neither link (unlikely standard behavior)
+                    self.logger.warning("Received response with neither next_link nor delta_link.")
+                    break
 
         except Exception as e:
-            self.logger.error(f"❌ Error syncing user groups: {e}", exc_info=True)
+            self.logger.error(f"❌ Error in unified user group sync: {e}", exc_info=True)
             raise
+
+    async def handle_group_create(self, group: Group) -> None:
+        """
+        Handles the creation or update of a single user group.
+        Fetches members and sends to data processor.
+        """
+        try:
+
+            # 1. Fetch latest members for this group
+            members = await self.msgraph_client.get_group_members(group.id)
+
+            # 2. Create AppUserGroup entity
+            user_group = AppUserGroup(
+                source_user_group_id=group.id,
+                app_name=self.connector_name,
+                name=group.display_name,
+                description=group.description,
+                source_created_at=group.created_date_time.timestamp() if group.created_date_time else get_epoch_timestamp_in_ms(),
+            )
+
+            # 3. Create AppUser entities for members
+            app_users = []
+            for member in members:
+                app_user = AppUser(
+                    source_user_id=member.id,
+                    email=member.mail or member.user_principal_name,
+                    full_name=member.display_name,
+                    source_created_at=member.created_date_time.timestamp() if member.created_date_time else get_epoch_timestamp_in_ms(),
+                    app_name=self.connector_name,
+                )
+                app_users.append(app_user)
+
+            # 4. Send to processor (wrapped in list as expected by on_new_user_groups)
+            await self.data_entities_processor.on_new_user_groups([(user_group, app_users)])
+
+            self.logger.info(f"Processed group creation/update for: {group.display_name}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Error handling group create for {getattr(group, 'id', 'unknown')}: {e}", exc_info=True)
+
+    async def handle_delete_group(self, group_id: str) -> None:
+        """
+        Handles the deletion of a single user group.
+        Calls the data processor to remove it from the database.
+
+        Args:
+            group_id: The external ID of the group to be deleted.
+        """
+        try:
+            self.logger.info(f"Handling group deletion for: {group_id}")
+
+            # Call the data entities processor to handle the deletion logic
+            await self.data_entities_processor.on_user_group_deleted(
+                external_group_id=group_id,
+                connector_name=self.connector_name
+            )
+
+            self.logger.info(f"Successfully processed group deletion for: {group_id}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Error handling group delete for {group_id}: {e}", exc_info=True)
 
     async def _run_sync_with_yield(self, user_id: str) -> None:
         """
@@ -435,6 +725,7 @@ class OneDriveConnector(BaseConnector):
             while True:
                 # Fetch delta changes
                 result = await self.msgraph_client.get_delta_response(url)
+
                 drive_items = result.get('drive_items')
                 if not result or not drive_items:
                     break
@@ -446,14 +737,15 @@ class OneDriveConnector(BaseConnector):
                         await self._handle_record_updates(record_update)
                         continue
 
+                    # Handle updates
+                    if record_update.is_updated:
+                        await self._handle_record_updates(record_update)
+                        continue
+
                     if file_record:
                         # Add to batch
                         batch_records.append((file_record, permissions))
                         batch_count += 1
-
-                        # Handle updates if needed
-                        if record_update.is_updated:
-                            await self._handle_record_updates(record_update)
 
                         # Process batch when it reaches the size limit
                         if batch_count >= self.batch_size:
@@ -619,6 +911,9 @@ class OneDriveConnector(BaseConnector):
         try:
             self.logger.info("Processing webhook notification")
 
+            # Reinitialize credential if needed (webhooks might arrive after days of inactivity)
+            await self._reinitialize_credential_if_needed()
+
             # Extract relevant information from notification
             resource = notification.get('resource', '')
             notification.get('changeType', '')
@@ -646,6 +941,11 @@ class OneDriveConnector(BaseConnector):
         try:
             self.logger.info("Starting OneDrive connector sync")
 
+            # Reinitialize credential to prevent "HTTP transport has already been closed" errors
+            # This is necessary because the connector instance may be reused across multiple
+            # scheduled runs that are days apart, causing the HTTP session to timeout
+            await self._reinitialize_credential_if_needed()
+
             # Step 1: Sync users
             self.logger.info("Syncing users...")
             users = await self.msgraph_client.get_all_users()
@@ -669,6 +969,55 @@ class OneDriveConnector(BaseConnector):
             self.logger.error(f"❌ Error in OneDrive connector run: {e}")
             raise
 
+    async def _reinitialize_credential_if_needed(self) -> None:
+        """
+        Reinitialize the credential and clients if the HTTP transport has been closed.
+        This prevents "HTTP transport has already been closed" errors when the connector
+        instance is reused across multiple scheduled runs that are days apart.
+        """
+        try:
+            # Test if the credential is still valid by attempting to get a token
+            await self.credential.get_token("https://graph.microsoft.com/.default")
+            self.logger.debug("✅ Credential is valid and active")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Credential needs reinitialization: {e}")
+
+            # Close old credential if it exists
+            if hasattr(self, 'credential') and self.credential:
+                try:
+                    await self.credential.close()
+                except Exception:
+                    pass
+
+            # Get credentials from config
+            config = self.config.get("credentials", {})
+            auth_config = config.get("auth", {})
+            tenant_id = auth_config.get("tenantId")
+            client_id = auth_config.get("clientId")
+            client_secret = auth_config.get("clientSecret")
+
+            if not all((tenant_id, client_id, client_secret)):
+                raise ValueError("Cannot reinitialize: credentials not found in config")
+
+            # Create new credential
+            self.credential = ClientSecretCredential(
+                tenant_id=tenant_id,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+
+            # Pre-initialize to establish HTTP session
+            await self.credential.get_token("https://graph.microsoft.com/.default")
+
+            # Recreate Graph client with new credential
+            self.client = GraphServiceClient(
+                self.credential,
+                scopes=["https://graph.microsoft.com/.default"]
+            )
+            self.msgraph_client = MSGraphClient(self.connector_name, self.client, self.logger)
+
+            self.logger.info("✅ Credential successfully reinitialized")
+
     async def run_incremental_sync(self) -> None:
         """
         Run incremental sync for a specific user or all users.
@@ -679,6 +1028,9 @@ class OneDriveConnector(BaseConnector):
         """
         try:
             self.logger.info("Starting incremental sync for all users")
+
+            # Reinitialize credential to prevent session timeout issues
+            await self._reinitialize_credential_if_needed()
 
             # Sync all active users
             users = await self.msgraph_client.get_all_users()
@@ -701,35 +1053,58 @@ class OneDriveConnector(BaseConnector):
             # self.processed_items.clear()
             # self.permission_cache.clear()
 
-            # Close any open connections
+            # Close any open connections in the GraphServiceClient first
             if hasattr(self, 'client') and self.client:
                 # GraphServiceClient doesn't have explicit close, but we can clear the reference
                 self.client = None
+
+            # Clear msgraph_client reference
+            if hasattr(self, 'msgraph_client'):
+                self.msgraph_client = None
+
+            # Close the credential last to properly close the HTTP transport
+            # This must be done after all API operations are complete
+            if hasattr(self, 'credential') and self.credential:
+                try:
+                    await self.credential.close()
+                    self.logger.info("✅ Credential HTTP transport closed successfully")
+                except Exception as cred_error:
+                    self.logger.warning(f"⚠️ Error closing credential (may already be closed): {cred_error}")
+                finally:
+                    self.credential = None
 
             self.logger.info("OneDrive connector cleanup completed")
 
         except Exception as e:
             self.logger.error(f"❌ Error during cleanup: {e}")
 
+    async def reindex_records(self, record_results: List[Record]) -> None:
+        """Reindex records - not implemented for OneDrive yet."""
+        self.logger.warning("Reindex not implemented for OneDrive connector")
+        pass
+
     async def get_signed_url(self, record: Record) -> str:
         """
         Create a signed URL for a specific record.
         """
         try:
+            # Reinitialize credential if needed (user might be accessing files after days of inactivity)
+            await self._reinitialize_credential_if_needed()
+
             return await self.msgraph_client.get_signed_url(record.external_record_group_id, record.external_record_id)
         except Exception as e:
             self.logger.error(f"❌ Error creating signed URL for record {record.id}: {e}")
             raise
 
     async def stream_record(self, record: Record) -> StreamingResponse:
-        """Stream a record from SharePoint."""
+        """Stream a record from OneDrive."""
         signed_url = await self.get_signed_url(record)
         if not signed_url:
             raise HTTPException(status_code=HttpStatusCode.NOT_FOUND.value, detail="File not found or access denied")
 
         return StreamingResponse(
             stream_content(signed_url),
-            media_type=record.mime_type.value if record.mime_type else "application/octet-stream",
+            media_type=record.mime_type if record.mime_type else "application/octet-stream",
             headers={
                 "Content-Disposition": f"attachment; filename={record.record_name}"
             }

@@ -11,6 +11,8 @@ export interface ConfiguredModel {
   isActive: boolean;
   isDefault: boolean;
   isMultimodal?: boolean;
+  isReasoning?: boolean;
+  contextLength?: number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -29,7 +31,9 @@ export interface ModelData {
   provider: string;
   configuration: Record<string, any>;
   isMultimodal?: boolean;
+  isReasoning?: boolean;
   isDefault?: boolean;
+  contextLength?: number;
   name?: string;
 }
 
@@ -51,6 +55,15 @@ export const AVAILABLE_MODEL_PROVIDERS: ModelProvider[] = [
     supportedTypes: ['llm', 'embedding'],
     isPopular: true,
     color: '#4285F4',
+  },
+  {
+    id: 'azureAI',
+    name: 'Azure AI',
+    description: 'Access Azure AI Foundry models including GPT-4o, DeepSeek R1, Cohere, and more',
+    src: '/assets/icons/ai-models/azure-color.svg',
+    supportedTypes: ['llm', 'embedding'],
+    isPopular: true,
+    color: '#0078D4',
   },
   {
     id: 'azureOpenAI',
@@ -167,7 +180,7 @@ export const AVAILABLE_MODEL_PROVIDERS: ModelProvider[] = [
     color: '#0078D4',
   },
   {
-    id: 'huggingface',
+    id: 'huggingFace',
     name: 'HuggingFace (System Provided)',
     description: 'Open-source transformer models',
     supportedTypes: ['embedding'],

@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Typography,
-  TextField,
   FormControl,
   Select,
   MenuItem,
@@ -14,20 +13,11 @@ import {
 } from '@mui/material';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
-import dayjs from 'dayjs';
-import timezone from 'dayjs/plugin/timezone';
-import utc from 'dayjs/plugin/utc';
-import { MobileDateTimePicker } from '@mui/x-date-pickers/MobileDateTimePicker';
 import { ScheduledConfig } from '../types/types';
-
-// Extend dayjs with timezone support
-dayjs.extend(utc);
-dayjs.extend(timezone);
 
 interface ScheduledSyncConfigProps {
   value: ScheduledConfig;
   onChange: (value: ScheduledConfig) => void;
-  error?: string;
   disabled?: boolean;
 }
 
@@ -62,95 +52,37 @@ const INTERVAL_OPTIONS = [
 const ScheduledSyncConfig: React.FC<ScheduledSyncConfigProps> = ({
   value = {},
   onChange,
-  error,
   disabled = false,
 }) => {
   const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
   const [localValue, setLocalValue] = useState<ScheduledConfig>({
     intervalMinutes: 60,
     timezone: 'UTC',
-    startTime: 0,
-    maxRepetitions: 0,
     ...value,
   });
 
   // Initialize from existing data when value changes
   useEffect(() => {
     if (value) {
-      let startTime = value.startTime || 0;
-
-      // Convert seconds to milliseconds if needed
-      if (startTime > 0 && startTime < 1e10) {
-        startTime *= 1000;
-      }
-
-      const newLocalValue = {
+      setLocalValue({
         intervalMinutes: value.intervalMinutes || 60,
         timezone: value.timezone || 'UTC',
-        startTime,
-        maxRepetitions: value.maxRepetitions || 0,
-        nextTime: value.nextTime || 0,
-        endTime: value.endTime || 0,
-        repetitionCount: value.repetitionCount || 0,
-      };
-
-      setLocalValue(newLocalValue);
+      });
     }
   }, [value]);
 
-  // Helper function to convert epoch time to dayjs object
-  const epochToDayjs = (epochMs: number) => {
-    if (!epochMs || epochMs === 0) return null;
-    return dayjs(epochMs).tz(localValue.timezone || 'UTC');
-  };
-
-  // Helper function to convert dayjs object to epoch time
-  const dayjsToEpoch = (dayjsObj: dayjs.Dayjs | null): number => {
-    if (!dayjsObj) return 0;
-    return dayjsObj.valueOf(); // Returns milliseconds
-  };
-
-  // Calculate time values based on user input
-  const calculateTimes = useCallback((config: ScheduledConfig) => {
-    if (!config.startTime || config.startTime === 0) {
-      return null;
-    }
-
-    const startTimeMs = config.startTime;
-    const nextTimeMs = startTimeMs;
-    const endTimeMs = startTimeMs;
-    const totalRepetitions = 1;
-
-    return {
-      startTime: startTimeMs,
-      nextTime: nextTimeMs || 0,
-      endTime: endTimeMs,
-      totalRepetitions,
-    };
-  }, []);
-
-  // Update time calculation when config changes
+  // Propagate interval and timezone to parent when changed
   useEffect(() => {
-    // Debounce calculation
     const timeoutId = setTimeout(() => {
-      const calculation = calculateTimes(localValue);
-
-      if (calculation) {
-        const updatedValue = {
-          ...localValue,
-          startTime: calculation.startTime,
-          nextTime: calculation.nextTime,
-          endTime: calculation.endTime,
-          maxRepetitions: calculation.totalRepetitions,
-          repetitionCount: 0,
-        };
-
-        onChange(updatedValue);
-      }
+      onChange({
+        intervalMinutes: localValue.intervalMinutes,
+        timezone: localValue.timezone,
+      });
     }, 300);
 
     return () => clearTimeout(timeoutId);
-  }, [localValue, calculateTimes, onChange]);
+  }, [localValue, onChange]);
 
   const handleFieldChange = (field: string, newValue: any) => {
     setLocalValue((prev: ScheduledConfig) => ({
@@ -161,299 +93,137 @@ const ScheduledSyncConfig: React.FC<ScheduledSyncConfigProps> = ({
 
   return (
     <LocalizationProvider dateAdapter={AdapterDayjs}>
-      <Stack spacing={2}>
-        <Grid container spacing={2}>
-          {/* Start Date & Time */}
-          <Grid item xs={12} md={6}>
-            <Typography
-              variant="body2"
-              sx={{
-                mb: 1,
-                fontWeight: 500,
-                fontSize: '0.8125rem',
-                color: theme.palette.text.primary,
-              }}
-            >
-              Start Date & Time
-            </Typography>
-            <MobileDateTimePicker
-              orientation="landscape"
-              value={epochToDayjs(localValue.startTime || 0)}
-              onChange={(newValue) => {
-                const epochTime = dayjsToEpoch(newValue);
-                handleFieldChange('startTime', epochTime);
-              }}
+      <Stack spacing={1.5}>
+        {/* Sync Interval - Full Width */}
+        <Box>
+          <Typography
+            variant="body2"
+            sx={{
+              mb: 1,
+              fontWeight: 600,
+              fontSize: '0.875rem',
+              color: theme.palette.text.primary,
+            }}
+          >
+            Sync Interval
+          </Typography>
+          <FormControl fullWidth size="small">
+            <Select
+              value={localValue.intervalMinutes}
+              onChange={(e) => handleFieldChange('intervalMinutes', e.target.value)}
               disabled={disabled}
-              timezone={localValue.timezone || 'UTC'}
-              format="MMM DD, YYYY hh:mm A"
-              slotProps={{
-                textField: {
-                  fullWidth: true,
-                  size: 'small',
-                  error: !!error,
-                  placeholder: 'Select date and time',
-                  sx: {
-                    '& .MuiOutlinedInput-root': {
-                      borderRadius: 1.25,
-                      fontSize: '0.8125rem',
-                      '&:hover .MuiOutlinedInput-notchedOutline': {
-                        borderColor: alpha(theme.palette.primary.main, 0.25),
-                      },
-                      '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                        borderColor: theme.palette.primary.main,
-                        borderWidth: '1px',
-                      },
-                    },
-                  },
-                },
-
-                layout: {
-                  sx: {
-                    '& .MuiPickersLayout-root': {
-                      overflow: 'hidden',
-                    },
-                    '& .MuiPickersLayout-contentWrapper': {
-                      position: 'relative',
-                    },
-                  },
-                },
-                calendarHeader: {
-                  sx: {
-                    '& .MuiPickersCalendarHeader-root': {
-                      paddingTop: '16px',
-                      paddingBottom: '8px',
-                      borderBottom: `1px solid ${alpha(theme.palette.divider, 0.08)}`,
-                      marginBottom: '8px',
-                    },
-                    '& .MuiPickersCalendarHeader-label': {
-                      fontSize: '0.9375rem',
-                      fontWeight: 600,
-                      color: theme.palette.text.primary,
-                    },
-                    '& .MuiPickersCalendarHeader-switchViewButton': {
-                      fontSize: '0.9375rem',
-                      fontWeight: 600,
-                    },
-                    '& .MuiPickersArrowSwitcher-button': {
-                      borderRadius: 1,
-                      '&:hover': {
-                        bgcolor: alpha(theme.palette.primary.main, 0.08),
-                      },
-                    },
-                  },
-                },
-                day: {
-                  sx: {
-                    '&.MuiPickersDay-root': {
-                      borderRadius: 1,
-                      fontSize: '0.8125rem',
-                      '&:hover': {
-                        bgcolor: alpha(theme.palette.primary.main, 0.08),
-                      },
-                      '&.Mui-selected': {
-                        bgcolor: theme.palette.primary.main,
-                        '&:hover': {
-                          bgcolor: theme.palette.primary.dark,
-                        },
-                      },
-                      '&.MuiPickersDay-today': {
-                        border: `1px solid ${alpha(theme.palette.primary.main, 0.3)}`,
-                        '&:not(.Mui-selected)': {
-                          color: theme.palette.primary.main,
-                          fontWeight: 500,
-                        },
-                      },
-                    },
-                  },
-                },
-
-                actionBar: {
-                  sx: {
-                    '& .MuiPickersActionBar-root': {
-                      borderTop: `1px solid ${alpha(theme.palette.divider, 0.08)}`,
-                      padding: '12px 16px',
-                    },
-                    '& .MuiButton-root': {
-                      borderRadius: 1,
-                      textTransform: 'none',
-                      fontWeight: 500,
-                      fontSize: '0.8125rem',
-                      '&.MuiButton-text': {
-                        color: theme.palette.text.secondary,
-                        '&:hover': {
-                          bgcolor: alpha(theme.palette.text.secondary, 0.08),
-                        },
-                      },
-                      '&.MuiButton-outlined': {
-                        borderColor: alpha(theme.palette.divider, 0.15),
-                        '&:hover': {
-                          borderColor: alpha(theme.palette.primary.main, 0.25),
-                          bgcolor: alpha(theme.palette.primary.main, 0.04),
-                        },
-                      },
-                    },
-                  },
-                },
-              }}
-            />
-          </Grid>
-
-          {/* Timezone */}
-          <Grid item xs={12} md={6}>
-            <Typography
-              variant="body2"
+              displayEmpty
               sx={{
-                mb: 1,
+                borderRadius: 1.25,
+                fontSize: '0.875rem',
                 fontWeight: 500,
-                fontSize: '0.8125rem',
-                color: theme.palette.text.primary,
+                backgroundColor: alpha(theme.palette.background.paper, 0.8),
+                transition: 'all 0.2s',
+                '&:hover .MuiOutlinedInput-notchedOutline': {
+                  borderColor: alpha(theme.palette.primary.main, 0.3),
+                },
+                '&.Mui-focused': {
+                  backgroundColor: theme.palette.background.paper,
+                },
+                '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                  borderColor: theme.palette.primary.main,
+                  borderWidth: '1px',
+                },
               }}
             >
-              Timezone
-            </Typography>
-            <FormControl fullWidth size="small">
-              <Select
-                value={localValue.timezone}
-                onChange={(e) => handleFieldChange('timezone', e.target.value)}
-                disabled={disabled}
-                displayEmpty
-                sx={{
-                  borderRadius: 1.25,
-                  fontSize: '0.8125rem',
-                  '&:hover .MuiOutlinedInput-notchedOutline': {
-                    borderColor: alpha(theme.palette.primary.main, 0.25),
-                  },
-                  '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                    borderColor: theme.palette.primary.main,
-                    borderWidth: '1px',
-                  },
-                }}
-              >
-                <MenuItem disabled value="">
-                  <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8125rem' }}>
-                    Select timezone
+              <MenuItem disabled value="">
+                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.875rem' }}>
+                  Select interval
+                </Typography>
+              </MenuItem>
+              {INTERVAL_OPTIONS.map((option) => (
+                <MenuItem key={option.value} value={option.value}>
+                  <Typography variant="body2" sx={{ fontSize: '0.875rem' }}>
+                    {option.label}
                   </Typography>
                 </MenuItem>
-                {TIMEZONES.map((tz) => (
-                  <MenuItem key={tz.name} value={tz.name}>
-                    <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
-                      {tz.displayName}
-                    </Typography>
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Grid>
+              ))}
+            </Select>
+          </FormControl>
+        </Box>
 
-          {/* Sync Interval */}
-          <Grid item xs={12} md={6}>
-            <Typography
-              variant="body2"
-              sx={{
-                mb: 1,
-                fontWeight: 500,
-                fontSize: '0.8125rem',
-                color: theme.palette.text.primary,
-              }}
-            >
-              Sync Interval
-            </Typography>
-            <FormControl fullWidth size="small">
-              <Select
-                value={localValue.intervalMinutes}
-                onChange={(e) => handleFieldChange('intervalMinutes', e.target.value)}
-                disabled={disabled}
-                displayEmpty
-                sx={{
-                  borderRadius: 1.25,
-                  fontSize: '0.8125rem',
-                  '&:hover .MuiOutlinedInput-notchedOutline': {
-                    borderColor: alpha(theme.palette.primary.main, 0.25),
-                  },
-                  '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                    borderColor: theme.palette.primary.main,
-                    borderWidth: '1px',
-                  },
-                }}
-              >
-                <MenuItem disabled value="">
-                  <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.8125rem' }}>
-                    Select interval
-                  </Typography>
-                </MenuItem>
-                {INTERVAL_OPTIONS.map((option) => (
-                  <MenuItem key={option.value} value={option.value}>
-                    <Typography variant="body2" sx={{ fontSize: '0.8125rem' }}>
-                      {option.label}
-                    </Typography>
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-          </Grid>
-
-          {/* Max Repetitions */}
-          <Grid item xs={12} md={6}>
-            <Typography
-              variant="body2"
-              sx={{
-                mb: 1,
-                fontWeight: 500,
-                fontSize: '0.8125rem',
-                color: theme.palette.text.primary,
-              }}
-            >
-              Max Repetitions
-            </Typography>
-            <TextField
-              fullWidth
-              size="small"
-              placeholder="0 = infinite"
-              type="number"
-              value={localValue.maxRepetitions || 0}
-              onChange={(e) => handleFieldChange('maxRepetitions', parseInt(e.target.value, 10) || 0)}
+        {/* Timezone - Hidden for now */}
+        {/* <Grid item xs={12} md={6}>
+          <Typography
+            variant="body2"
+            sx={{
+              mb: 1,
+              fontWeight: 600,
+              fontSize: '0.875rem',
+              color: theme.palette.text.primary,
+            }}
+          >
+            Timezone
+          </Typography>
+          <FormControl fullWidth size="small">
+            <Select
+              value={localValue.timezone}
+              onChange={(e) => handleFieldChange('timezone', e.target.value)}
               disabled={disabled}
-              inputProps={{ min: 0 }}
+              displayEmpty
               sx={{
-                '& .MuiOutlinedInput-root': {
-                  borderRadius: 1.25,
-                  fontSize: '0.8125rem',
-                  '&:hover .MuiOutlinedInput-notchedOutline': {
-                    borderColor: alpha(theme.palette.primary.main, 0.25),
-                  },
-                  '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                    borderColor: theme.palette.primary.main,
-                    borderWidth: '1px',
-                  },
+                borderRadius: 1.25,
+                fontSize: '0.875rem',
+                fontWeight: 500,
+                backgroundColor: alpha(theme.palette.background.paper, 0.8),
+                transition: 'all 0.2s',
+                '&:hover .MuiOutlinedInput-notchedOutline': {
+                  borderColor: alpha(theme.palette.primary.main, 0.3),
+                },
+                '&.Mui-focused': {
+                  backgroundColor: theme.palette.background.paper,
+                },
+                '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                  borderColor: theme.palette.primary.main,
+                  borderWidth: '1px',
                 },
               }}
-            />
-          </Grid>
-        </Grid>
+            >
+              <MenuItem disabled value="">
+                <Typography variant="body2" color="text.secondary" sx={{ fontSize: '0.875rem' }}>
+                  Select timezone
+                </Typography>
+              </MenuItem>
+              {TIMEZONES.map((tz) => (
+                <MenuItem key={tz.name} value={tz.name}>
+                  <Typography variant="body2" sx={{ fontSize: '0.875rem' }}>
+                    {tz.displayName}
+                  </Typography>
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Grid> */}
 
-        {/* Simple Summary */}
+        {/* Summary */}
         <Box
           sx={{
-            p: 1.5,
+            p: 1.25,
             borderRadius: 1.25,
-            border: `1px solid ${alpha(theme.palette.divider, 0.12)}`,
-            bgcolor: alpha(theme.palette.grey[50], 0.3),
+            border: `1px solid ${alpha(theme.palette.divider, isDark ? 0.12 : 0.12)}`,
+            bgcolor: isDark
+              ? alpha(theme.palette.primary.main, 0.08)
+              : alpha(theme.palette.primary.main, 0.02),
+            transition: 'all 0.2s',
           }}
         >
           <Typography
             variant="body2"
             color="text.secondary"
             sx={{
-              fontSize: '0.75rem',
-              lineHeight: 1.4,
+              fontSize: '0.8125rem',
+              lineHeight: 1.5,
+              fontWeight: 500,
             }}
           >
-            {localValue.startTime
-              ? `Sync every ${INTERVAL_OPTIONS.find((opt) => opt.value === localValue.intervalMinutes)?.label || '1 hour'} starting ${epochToDayjs(localValue.startTime)?.format('MMM DD, YYYY hh:mm A') || 'when configured'} (${TIMEZONES.find((tz) => tz.name === localValue.timezone)?.displayName || 'UTC'})`
-              : 'Configure the start date and time to set up scheduled sync'}
-            {localValue.maxRepetitions &&
-              localValue.maxRepetitions > 0 &&
-              ` for ${localValue.maxRepetitions} executions`}
+            Syncs every{' '}
+            {INTERVAL_OPTIONS.find((opt) => opt.value === localValue.intervalMinutes)?.label ||
+              '1 hour'}
           </Typography>
         </Box>
 
@@ -462,13 +232,16 @@ const ScheduledSyncConfig: React.FC<ScheduledSyncConfigProps> = ({
           severity="info"
           variant="outlined"
           sx={{
-            borderRadius: 1.5,
-            py: 1.25,
+            borderRadius: 1.25,
+            py: 0.875,
+            px: 1.5,
+            '& .MuiAlert-icon': { fontSize: '1.125rem', py: 0.375 },
+            '& .MuiAlert-message': { py: 0.125 },
+            alignItems: 'center',
           }}
         >
-          <Typography variant="body2" sx={{ fontSize: '0.8125rem', lineHeight: 1.4 }}>
-            Scheduled syncs will run automatically at the specified intervals. All times are
-            calculated based on the selected timezone.
+          <Typography variant="body2" sx={{ fontSize: '0.8125rem', lineHeight: 1.5 }}>
+            Scheduled syncs will run automatically at the specified intervals.
           </Typography>
         </Alert>
       </Stack>

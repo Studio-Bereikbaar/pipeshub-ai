@@ -21,6 +21,7 @@ import plusCircleIcon from '@iconify-icons/mdi/plus-circle';
 import boltIcon from '@iconify-icons/mdi/bolt';
 import { Connector } from '../types/types';
 import ConnectorConfigForm from './connector-config/connector-config-form';
+import { isNoneAuthType } from '../utils/auth';
 
 interface ConnectorCardProps {
   connector: Connector;
@@ -96,7 +97,7 @@ const ConnectorCard = ({ connector }: ConnectorCardProps) => {
       return;
     }
     // If already configured, navigate to the management page
-    navigate(`${connector.name.toLowerCase()}`);
+    navigate(`${connector.name}`);
   };
 
   const handleConfigFormClose = () => {
@@ -106,7 +107,7 @@ const ConnectorCard = ({ connector }: ConnectorCardProps) => {
   const handleConfigSuccess = () => {
     setIsConfigFormOpen(false);
     // Optionally refresh the connector data or show success message
-    navigate(`${connector.name.toLowerCase()}`);
+    navigate(`${connector.name}`);
   };
 
   return (
@@ -139,7 +140,7 @@ const ConnectorCard = ({ connector }: ConnectorCardProps) => {
           },
         },
       }}
-    //   onClick={() => navigate(`/account-details/connectors/${connector._key}`)}
+      onClick={() => configureConnector()}
     >
       {/* Status Dot */}
       {isActive && (
@@ -175,7 +176,7 @@ const ConnectorCard = ({ connector }: ConnectorCardProps) => {
               width: 48,
               height: 48,
               backgroundColor: isDark
-                ? alpha(theme.palette.background.default, 0.4)
+                ? alpha(theme.palette.common.white, 0.9)
                 : alpha(theme.palette.grey[100], 0.8),
               border: `1px solid ${theme.palette.divider}`,
               transition: theme.transitions.create('transform'),
@@ -246,21 +247,23 @@ const ConnectorCard = ({ connector }: ConnectorCardProps) => {
           alignItems="center"
           sx={{ minHeight: 20 }}
         >
-          <Typography
-            variant="caption"
-            sx={{
-              px: 1,
-              py: 0.25,
-              borderRadius: 0.5,
-              fontSize: '0.6875rem',
-              fontWeight: 500,
-              color: theme.palette.text.secondary,
-              backgroundColor: alpha(theme.palette.text.secondary, 0.08),
-              border: `1px solid ${alpha(theme.palette.text.secondary, 0.12)}`,
-            }}
-          >
-            {connector.authType.split('_').join(' ')}
-          </Typography>
+          {!isNoneAuthType(connector.authType) && (
+            <Typography
+              variant="caption"
+              sx={{
+                px: 1,
+                py: 0.25,
+                borderRadius: 0.5,
+                fontSize: '0.6875rem',
+                fontWeight: 500,
+                color: theme.palette.text.secondary,
+                backgroundColor: alpha(theme.palette.text.secondary, 0.08),
+                border: `1px solid ${alpha(theme.palette.text.secondary, 0.12)}`,
+              }}
+            >
+              {connector.authType.split('_').join(' ')}
+            </Typography>
+          )}
           
           {connector.supportsRealtime && (
             <Tooltip title="Real-time sync supported" arrow>
@@ -363,11 +366,16 @@ const ConnectorCard = ({ connector }: ConnectorCardProps) => {
 
         {/* Action Button */}
         {isConfigFormOpen && (
-          <ConnectorConfigForm 
-            connector={connector} 
-            onClose={handleConfigFormClose}
-            onSuccess={handleConfigSuccess}
-          />
+          <Box
+            // Prevent clicks inside the dialog from bubbling to the Card
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ConnectorConfigForm 
+              connector={connector} 
+              onClose={handleConfigFormClose}
+              onSuccess={handleConfigSuccess}
+            />
+          </Box>
         )}
         <Button
           fullWidth 
@@ -381,7 +389,11 @@ const ConnectorCard = ({ connector }: ConnectorCardProps) => {
               height={16}
             />
           }
-          onClick={() => configureConnector()}
+          onClick={(e) => {
+            // Avoid re-triggering Card's onClick when clicking the button
+            e.stopPropagation();
+            configureConnector();
+          }}
           sx={{
             mt: 'auto',
             height: 38,

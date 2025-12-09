@@ -3,6 +3,7 @@ from dotenv import load_dotenv  # type: ignore
 
 from app.config.configuration_service import ConfigurationService
 from app.config.providers.etcd.etcd3_encrypted_store import Etcd3EncryptedKeyValueStore
+from app.connectors.services.kafka_service import KafkaService
 from app.containers.container import BaseAppContainer
 from app.containers.utils.utils import ContainerUtils
 from app.health.health import Health
@@ -29,11 +30,15 @@ class IndexingAppContainer(BaseAppContainer):
     redis_client = providers.Resource(
         BaseAppContainer._create_redis_client, config_service=config_service
     )
+    kafka_service = providers.Singleton(
+        KafkaService, logger=logger, config_service=config_service
+    )
     arango_service = providers.Resource(
         container_utils.create_arango_service,
         logger=logger,
         arango_client=arango_client,
         config_service=config_service,
+        kafka_service=kafka_service,
     )
     vector_db_service = providers.Resource(
         container_utils.get_vector_db_service,
@@ -82,6 +87,7 @@ class IndexingAppContainer(BaseAppContainer):
         arango=arango,
         blob_storage=blob_storage,
         vector_store=vector_store,
+        arango_service=arango_service,
     )
 
     # Parsers
@@ -105,6 +111,7 @@ class IndexingAppContainer(BaseAppContainer):
         logger=logger,
         processor=processor,
         arango_service=arango_service,
+        config_service=config_service,
     )
 
     redis_scheduler = providers.Resource(
@@ -127,16 +134,16 @@ async def initialize_container(container: IndexingAppContainer) -> bool:
     logger.info("🚀 Initializing application resources")
 
     try:
-        # Connect to ArangoDB and Redis
-        logger.info("Connecting to ArangoDB")
+        # Ensure connector service is healthy before starting indexing service
+        logger.info("Checking Connector service health before startup")
+        await Health.health_check_connector_service(container)
+
+        # Ensure ArangoDB service is initialized (connection is handled in the resource factory)
+        logger.info("Ensuring ArangoDB service is initialized")
         arango_service = await container.arango_service()
-        if arango_service:
-            arango_connected = await arango_service.connect()
-            if not arango_connected:
-                raise Exception("Failed to connect to ArangoDB")
-            logger.info("✅ Connected to ArangoDB")
-        else:
-            raise Exception("Failed to connect to ArangoDB")
+        if not arango_service:
+            raise Exception("Failed to initialize ArangoDB service")
+        logger.info("✅ ArangoDB service initialized")
 
         await Health.system_health_check(container)
         return True

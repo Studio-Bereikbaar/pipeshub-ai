@@ -23,7 +23,7 @@ export interface Item {
   createdAt: number;
   createdAtTimestamp?: number;
   updatedAtTimestamp?: number;
-  indexingStatus?: 'COMPLETED' | 'PENDING' | 'FAILED' | 'NOT_STARTED';
+  indexingStatus?: 'NOT_STARTED' | 'PAUSED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'FILE_TYPE_NOT_SUPPORTED' | 'AUTO_INDEX_OFF' | 'EMPTY' | 'ENABLE_MULTIMODAL_MODELS' | 'QUEUED';
   parentFolderId?: string;
   fileRecord?: {
     id: string;
@@ -43,6 +43,7 @@ export interface UserPermission {
   canCreateFolders: boolean;
   canEdit: boolean;
   canDelete: boolean;
+  canManagePermissions: boolean;
 }
 
 export interface FolderContents {

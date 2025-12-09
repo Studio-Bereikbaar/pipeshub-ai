@@ -9,8 +9,10 @@ import { Logger } from '../../../libs/services/logger.service';
 import { configPaths } from '../paths/paths';
 import {
   BadRequestError,
+  ForbiddenError,
   InternalServerError,
   NotFoundError,
+  ServiceUnavailableError,
   UnauthorizedError,
 } from '../../../libs/errors/http.errors';
 import {
@@ -49,10 +51,69 @@ import {
   AIServiceCommand,
 } from '../../../libs/commands/ai_service/ai.service.command';
 import { HttpMethod } from '../../../libs/enums/http-methods.enum';
+import { PLATFORM_FEATURE_FLAGS } from '../constants/constants';
+import { getPlatformSettingsFromStore } from '../utils/util';
 
 const logger = Logger.getInstance({
   service: 'ConfigurationManagerController',
 });
+
+const AI_SERVICE_UNAVAILABLE_MESSAGE =
+  'AI Service is currently unavailable. Please check your network connection or try again later.';
+
+const handleBackendError = (error: any, operation: string): Error => {
+  if (
+    (error?.cause && error.cause.code === 'ECONNREFUSED') ||
+    (typeof error?.message === 'string' &&
+      error.message.includes('fetch failed'))
+  ) {
+    return new ServiceUnavailableError(AI_SERVICE_UNAVAILABLE_MESSAGE, error);
+  }
+
+  if (error.response) {
+    const { status, data } = error.response;
+    const errorDetail =
+      data?.detail || data?.reason || data?.message || 'Unknown error';
+
+    logger.error(`Backend error during ${operation}`, {
+      status,
+      errorDetail,
+      fullResponse: data,
+    });
+
+    if (errorDetail === 'ECONNREFUSED') {
+      throw new ServiceUnavailableError(AI_SERVICE_UNAVAILABLE_MESSAGE, error);
+    }
+
+    switch (status) {
+      case 400:
+        return new BadRequestError(errorDetail);
+      case 401:
+        return new UnauthorizedError(errorDetail);
+      case 403:
+        return new ForbiddenError(errorDetail);
+      case 404:
+        return new NotFoundError(errorDetail);
+      case 500:
+        return new InternalServerError(errorDetail);
+      default:
+        return new InternalServerError(`Backend error: ${errorDetail}`);
+    }
+  }
+
+  if (error.request) {
+    logger.error(`No response from backend during ${operation}`);
+    return new InternalServerError('Backend service unavailable');
+  }
+
+  return new InternalServerError(`${operation} failed: ${error.message}`);
+};
+
+const normalizeUrl = (url: unknown): string => {
+  if (!url || typeof url !== 'string') return '';
+  const trimmed = String(url).trim();
+  return trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
+};
 
 function getOrgIdFromRequest(
   req: AuthenticatedUserRequest | AuthenticatedServiceRequest,
@@ -340,6 +401,57 @@ export const getSmtpConfig =
       next(error);
     }
   };
+
+// Platform settings
+export const setPlatformSettings =
+  (keyValueStoreService: KeyValueStoreService) =>
+  async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
+    try {
+      const { fileUploadMaxSizeBytes, featureFlags } = req.body;
+      const configManagerConfig = loadConfigurationManagerConfig();
+      const encryptedPlatformSettings = EncryptionService.getInstance(
+        configManagerConfig.algorithm,
+        configManagerConfig.secretKey,
+      ).encrypt(JSON.stringify({ fileUploadMaxSizeBytes, featureFlags, updatedAt: new Date().toISOString() }));
+      
+      await keyValueStoreService.set<string>(
+        configPaths.platform.settings,
+        encryptedPlatformSettings,
+      );
+
+      res.status(200).json({ message: 'Platform settings saved' }).end();
+    } catch (error: any) {
+      logger.error('Error setting platform settings', { error });
+      next(error);
+    }
+  };
+
+export const getPlatformSettings =
+  (keyValueStoreService: KeyValueStoreService) =>
+  async (
+    _req: AuthenticatedUserRequest | AuthenticatedServiceRequest,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    try {
+      const settings = await getPlatformSettingsFromStore(keyValueStoreService);
+      res.status(200).json(settings).end();
+    } catch (error: any) {
+      logger.error('Error getting platform settings', { error });
+      next(error);
+    }
+  };
+
+export const getAvailablePlatformFeatureFlags =
+  () =>
+  async (
+    _req: AuthenticatedUserRequest | AuthenticatedServiceRequest,
+    res: Response,
+    _next: NextFunction,
+  ) => {
+    res.status(200).json({ flags: PLATFORM_FEATURE_FLAGS }).end();
+  };
+
 
 export const getAzureAdAuthConfig =
   (keyValueStoreService: KeyValueStoreService) =>
@@ -1748,13 +1860,24 @@ export const setFrontendUrl =
         throw new NotFoundError('User not found');
       }
       const { url } = req.body;
+      const normalizedUrl = normalizeUrl(url);
+      if (!normalizedUrl) {
+        throw new BadRequestError('Invalid URL');
+      }
+      try {
+        new URL(normalizedUrl);
+      } catch (e) {
+        throw new BadRequestError(
+          'Invalid URL format. A protocol (e.g., http://) is required.',
+        );
+      }
       const urls =
         (await keyValueStoreService.get<string>(configPaths.endpoint)) || '{}';
       let parsedUrls = JSON.parse(urls);
       // Preserve existing `auth` object if it exists, otherwise create a new one
       parsedUrls.frontend = {
         ...parsedUrls.frontend,
-        publicEndpoint: url,
+        publicEndpoint: normalizedUrl,
       };
       // Save the updated object back to configPaths.endpoint
       await keyValueStoreService.set<string>(
@@ -1812,6 +1935,17 @@ export const setConnectorPublicUrl =
         throw new NotFoundError('User not found');
       }
       const { url } = req.body;
+      const normalizedUrl = normalizeUrl(url);
+      if (!normalizedUrl) {
+        throw new BadRequestError('Invalid URL');
+      }
+      try {
+        new URL(normalizedUrl);
+      } catch (e) {
+        throw new BadRequestError(
+          'Invalid URL format. A protocol (e.g., http://) is required.',
+        );
+      }
       const urls =
         (await keyValueStoreService.get<string>(configPaths.endpoint)) || '{}';
 
@@ -1820,7 +1954,7 @@ export const setConnectorPublicUrl =
       // Preserve existing `auth` object if it exists, otherwise create a new one
       parsedUrls.connectors = {
         ...parsedUrls.connectors,
-        publicEndpoint: url,
+        publicEndpoint: normalizedUrl,
       };
 
       // Save the updated object back to configPaths.endpoint
@@ -2022,6 +2156,7 @@ export const createAIModelsConfig =
           const modelKey = uuidv4();
           llm.modelKey = modelKey;
           llm.isMultimodal = false;
+          llm.isReasoning = false;
           llm.isDefault = index === 0;
         });
       }
@@ -2307,6 +2442,7 @@ export const getAvailableModelsByType =
             modelName,
             modelKey: config.modelKey,
             isMultimodal: config.isMultimodal || false,
+            isReasoning: config.isReasoning || false,
             isDefault: markDefault,
           };
           markDefault = false; // Only mark first model as default
@@ -2340,6 +2476,8 @@ export const addAIModelProvider =
         configuration,
         isMultimodal = false,
         isDefault = false,
+        isReasoning = false,
+        contextLength,
       } = req.body;
 
       // Validate required fields
@@ -2372,6 +2510,10 @@ export const addAIModelProvider =
         provider,
         configuration,
         modelType,
+        isMultimodal,
+        isDefault,
+        isReasoning,
+        contextLength,
       };
 
       const aiCommandOptions: AICommandOptions = {
@@ -2389,10 +2531,19 @@ export const addAIModelProvider =
         (await aiServiceCommand.execute()) as AIServiceResponse;
 
       if (!aiResponseData?.data || aiResponseData.statusCode !== 200) {
-        throw new InternalServerError(
-          `Failed to do health check of ${modelType} configuration, check credentials again`,
-          aiResponseData?.data,
-        );
+        const errData: any = aiResponseData?.data ?? {};
+        const reasonMessage =
+          (errData && (errData.message ?? errData.error?.message)) ??
+          `Failed to do health check of ${modelType} configuration, check credentials again`;
+
+        res.status(aiResponseData?.statusCode ?? 500).json({
+          error: {
+            status: 'error',
+            message: reasonMessage,
+            details: errData,
+          },
+        });
+        return;
       }
 
       const configManagerConfig = loadConfigurationManagerConfig();
@@ -2442,6 +2593,8 @@ export const addAIModelProvider =
         modelKey,
         isMultimodal,
         isDefault,
+        isReasoning,
+        contextLength,
       };
 
       // If this is set as default, remove default flag from other models
@@ -2483,11 +2636,13 @@ export const addAIModelProvider =
           provider,
           model: configuration.model,
           isDefault,
+          contextLength,
         },
       });
     } catch (error: any) {
       logger.error('Error adding AI model provider', { error });
-      next(error);
+      const handleError = handleBackendError(error, 'add AI model provider');
+      next(handleError);
     }
   };
 
@@ -2504,7 +2659,9 @@ export const updateAIModelProvider =
         provider,
         configuration,
         isMultimodal = false,
+        isReasoning = false,
         isDefault = false,
+        contextLength,
       } = req.body;
 
       logger.debug('updateAIModelProvider', {
@@ -2513,7 +2670,9 @@ export const updateAIModelProvider =
         provider,
         configuration,
         isMultimodal,
+        isReasoning,
         isDefault,
+        contextLength,
       });
 
       // Validate required fields
@@ -2529,6 +2688,10 @@ export const updateAIModelProvider =
         provider,
         configuration,
         modelType,
+        isMultimodal,
+        isReasoning,
+        isDefault,
+        contextLength,
       };
 
       const aiCommandOptions: AICommandOptions = {
@@ -2546,10 +2709,19 @@ export const updateAIModelProvider =
         (await aiServiceCommand.execute()) as AIServiceResponse;
 
       if (!aiResponseData?.data || aiResponseData.statusCode !== 200) {
-        throw new InternalServerError(
-          `Failed to do health check of ${modelType} configuration, check credentials again`,
-          aiResponseData?.data,
-        );
+        const errData: any = aiResponseData?.data ?? {};
+        const reasonMessage =
+          (errData && (errData.message ?? errData.error?.message)) ??
+          `Failed to do health check of ${modelType} configuration, check credentials again`;
+
+        res.status(aiResponseData?.statusCode ?? 500).json({
+          error: {
+            status: 'error',
+            message: reasonMessage,
+            details: errData,
+          },
+        });
+        return;
       }
 
       const configManagerConfig = loadConfigurationManagerConfig();
@@ -2608,7 +2780,8 @@ export const updateAIModelProvider =
       targetModel.configuration = configuration;
       targetModel.isMultimodal = isMultimodal;
       targetModel.isDefault = isDefault;
-
+      targetModel.isReasoning = isReasoning;
+      targetModel.contextLength = contextLength || null;
       // If this is set as default, remove default flag from other models of the same type
       if (isDefault) {
         for (const config of aiModels[targetModelType]) {
@@ -2645,11 +2818,15 @@ export const updateAIModelProvider =
           modelType: targetModelType,
           provider: targetModel.provider,
           model: targetModel.configuration?.model,
+          contextLength: targetModel.contextLength,
+          isMultimodal: targetModel.isMultimodal,
+          isReasoning: targetModel.isReasoning,
         },
       });
     } catch (error: any) {
       logger.error('Error updating AI model provider', { error });
-      next(error);
+      const handleError = handleBackendError(error, 'update AI model provider');
+      next(handleError);
     }
   };
 
@@ -2763,6 +2940,7 @@ export const deleteAIModelProvider =
           provider: deletedModel.provider,
           model: deletedModel.configuration?.model,
           wasDefault,
+          contextLength: deletedModel.contextLength,
         },
       });
     } catch (error: any) {
@@ -2869,6 +3047,7 @@ export const updateDefaultAIModel =
           modelType: targetModelType,
           provider: targetModel.provider,
           model: targetModel.configuration?.model,
+          contextLength: targetModel.contextLength,
         },
       });
     } catch (error: any) {

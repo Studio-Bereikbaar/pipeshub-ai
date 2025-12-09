@@ -1,4 +1,7 @@
-from typing import Any, Dict, Optional, Union
+from datetime import datetime, timedelta
+from typing import Any, AsyncGenerator, Dict, Literal, Optional, Union
+
+import httpx
 
 from app.sources.client.confluence.confluence import ConfluenceClient
 from app.sources.client.http.http_request import HTTPRequest
@@ -19,6 +22,51 @@ class ConfluenceDataSource:
     def get_data_source(self) -> 'ConfluenceDataSource':
         return self
 
+    async def download_attachment(
+        self,
+        parent_page_id: str,
+        attachment_id: str,
+        chunk_size: int = 8192
+    ) -> AsyncGenerator[bytes, None]:
+        """
+        Stream attachment file content from Confluence Cloud.
+
+        Downloads attachment by constructing download URL from parent page and attachment IDs.
+        Uses httpx for streaming to handle large files efficiently.
+
+        Args:
+            parent_page_id: The ID of the parent page containing the attachment
+            attachment_id: The ID of the attachment to download
+            chunk_size: Size of chunks to yield (default 8KB)
+
+        Yields:
+            bytes: File content in chunks
+
+        Raises:
+            Exception: If download fails or attachment not found
+        """
+        # Construct download URL
+        # Format: /wiki/rest/api/content/{pageId}/child/attachment/{attachmentId}/download
+        # v1 API uses /wiki/rest/api instead of /wiki/api/v2
+        v1_base_url = self.base_url.split('/wiki')[0] + '/wiki'
+        download_url = f"{v1_base_url}/rest/api/content/{parent_page_id}/child/attachment/{attachment_id}/download"
+
+        # Get auth headers from client (use only Authorization, let server determine content type)
+        auth_headers = self._client.headers.copy()
+
+        # Stream the file using httpx with redirect following enabled
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with client.stream(
+                'GET',
+                download_url,
+                headers=auth_headers,
+                timeout=300.0  # 5 minute timeout for large files
+            ) as response:
+                response.raise_for_status()
+
+                async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                    yield chunk
+
     async def get_admin_key(
         self,
         headers: Optional[Dict[str, Any]] = None
@@ -36,8 +84,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -61,8 +109,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -85,8 +133,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -127,8 +175,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -175,8 +223,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -205,8 +253,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -244,8 +292,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -271,8 +319,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -310,8 +358,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -344,8 +392,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -373,8 +421,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -412,8 +460,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -441,8 +489,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -477,8 +525,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -506,8 +554,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -548,8 +596,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -596,8 +644,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -624,8 +672,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -690,8 +738,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -718,8 +766,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -751,8 +799,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -796,8 +844,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -837,8 +885,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -876,8 +924,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -903,8 +951,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -936,8 +984,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -975,8 +1023,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1009,8 +1057,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1038,8 +1086,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1077,8 +1125,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1106,8 +1154,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1133,8 +1181,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1172,8 +1220,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1201,8 +1249,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1226,8 +1274,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1270,8 +1318,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1295,8 +1343,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1346,8 +1394,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1374,8 +1422,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1404,8 +1452,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1449,8 +1497,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1488,8 +1536,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1527,8 +1575,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1554,8 +1602,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1593,8 +1641,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1627,8 +1675,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1656,8 +1704,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1695,8 +1743,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1724,8 +1772,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1763,8 +1811,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1799,8 +1847,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1841,8 +1889,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1883,8 +1931,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -1934,10 +1982,377 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_pages_v1(
+        self,
+        modified_after: Optional[str] = None,
+        modified_before: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        space_key: Optional[str] = None,
+        order_by: Optional[Literal["lastModified", "created", "title"]] = None,
+        sort_order: Optional[Literal["asc", "desc"]] = None,
+        expand: Optional[str] = None,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        time_offset_hours: int = 0,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Fetch pages using v1 content API with time-based filtering.
+
+        Args:
+            modified_after: Filter pages modified after this datetime (ISO 8601)
+            modified_before: Filter pages modified before this datetime (ISO 8601)
+            created_after: Filter pages created after this datetime (ISO 8601)
+            created_before: Filter pages created before this datetime (ISO 8601)
+            space_key: Filter pages by specific space key
+            order_by: CQL sort field - lastModified, created, or title (default: None, API default).
+                      Must be specified together with sort_order, or neither.
+            sort_order: Sort direction - asc or desc (default: None, API default).
+                        Must be specified together with order_by, or neither.
+            expand: Comma-separated list of properties to expand (default: None, no expansion)
+            cursor: Pagination cursor from previous response's _links.next
+            limit: Number of results per page (default: Confluence API default, typically 25)
+            time_offset_hours: Hours to offset date filters (default: 0, no offset).
+                               Positive values: subtract from date (go back in time).
+                               Negative values: add to date (go forward in time).
+
+        Returns:
+            HTTPResponse containing pages array with pagination links
+
+        Raises:
+            ValueError: If only one of order_by/sort_order is specified
+        """
+        if self._client is None:
+            raise ValueError("HTTP client is not initialized")
+        _headers: Dict[str, Any] = dict(headers or {})
+
+        _query: Dict[str, Any] = {}
+
+        # Only add limit if specified, otherwise use API default
+        if limit is not None:
+            _query["limit"] = limit
+
+        # Add expand parameter
+        if expand:
+            _query["expand"] = expand
+
+        # Build CQL query for time filtering and ordering
+        cql_parts = ["type=page"]
+
+        # Add space filter if provided
+        if space_key:
+            cql_parts.append(f"space='{space_key}'")
+
+        if modified_after:
+            formatted_date = _format_cql_date_with_offset(modified_after, time_offset_hours)
+            cql_parts.append(f'lastModified > "{formatted_date}"')
+        if modified_before:
+            formatted_date = _format_cql_date_with_offset(modified_before, time_offset_hours)
+            cql_parts.append(f'lastModified < "{formatted_date}"')
+        if created_after:
+            formatted_date = _format_cql_date_with_offset(created_after, time_offset_hours)
+            cql_parts.append(f'created > "{formatted_date}"')
+        if created_before:
+            formatted_date = _format_cql_date_with_offset(created_before, time_offset_hours)
+            cql_parts.append(f'created < "{formatted_date}"')
+
+        # Combine filters
+        cql_query = " AND ".join(cql_parts)
+
+        # Add ordering only if both order_by and sort_order are specified
+        if order_by is not None or sort_order is not None:
+            if order_by is None or sort_order is None:
+                raise ValueError("Both order_by and sort_order must be specified together, or neither")
+            cql_query += f" order by {order_by} {sort_order}"
+
+        _query["cql"] = cql_query
+
+        # Handle pagination cursor
+        if cursor:
+            _query["cursor"] = cursor
+
+        # v1 API uses /wiki/rest/api instead of /wiki/api/v2
+        v1_base_url = self.base_url.split('/wiki')[0] + '/wiki'
+        rel_path = "/rest/api/content/search"
+        url = v1_base_url + rel_path
+
+        req = HTTPRequest(
+            method="GET",
+            url=url,
+            headers=_as_str_dict(_headers),
+            path={},
+            query=_as_str_dict(_query),
+            body=None,
+        )
+
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_blogposts_v1(
+        self,
+        modified_after: Optional[str] = None,
+        modified_before: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        space_key: Optional[str] = None,
+        order_by: Optional[Literal["lastModified", "created", "title"]] = None,
+        sort_order: Optional[Literal["asc", "desc"]] = None,
+        expand: Optional[str] = None,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        time_offset_hours: int = 0,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Fetch blogposts using v1 content API with time-based filtering.
+
+        Args:
+            modified_after: Filter blogposts modified after this datetime (ISO 8601)
+            modified_before: Filter blogposts modified before this datetime (ISO 8601)
+            created_after: Filter blogposts created after this datetime (ISO 8601)
+            created_before: Filter blogposts created before this datetime (ISO 8601)
+            space_key: Filter blogposts by specific space key
+            order_by: CQL sort field - lastModified, created, or title (default: None, API default).
+                      Must be specified together with sort_order, or neither.
+            sort_order: Sort direction - asc or desc (default: None, API default).
+                        Must be specified together with order_by, or neither.
+            expand: Comma-separated list of properties to expand (default: None, no expansion)
+            cursor: Pagination cursor from previous response's _links.next
+            limit: Number of results per page (default: Confluence API default, typically 25)
+            time_offset_hours: Hours to offset date filters (default: 0, no offset).
+                               Positive values: subtract from date (go back in time).
+                               Negative values: add to date (go forward in time).
+
+        Returns:
+            HTTPResponse containing blogposts array with pagination links
+
+        Raises:
+            ValueError: If only one of order_by/sort_order is specified
+        """
+        if self._client is None:
+            raise ValueError("HTTP client is not initialized")
+        _headers: Dict[str, Any] = dict(headers or {})
+
+        _query: Dict[str, Any] = {}
+
+        # Only add limit if specified, otherwise use API default
+        if limit is not None:
+            _query["limit"] = limit
+
+        # Add expand parameter
+        if expand:
+            _query["expand"] = expand
+
+        # Build CQL query for time filtering and ordering
+        cql_parts = ["type=blogpost"]
+
+        # Add space filter if provided
+        if space_key:
+            cql_parts.append(f"space='{space_key}'")
+
+        if modified_after:
+            formatted_date = _format_cql_date_with_offset(modified_after, time_offset_hours)
+            cql_parts.append(f'lastModified > "{formatted_date}"')
+        if modified_before:
+            formatted_date = _format_cql_date_with_offset(modified_before, time_offset_hours)
+            cql_parts.append(f'lastModified < "{formatted_date}"')
+        if created_after:
+            formatted_date = _format_cql_date_with_offset(created_after, time_offset_hours)
+            cql_parts.append(f'created > "{formatted_date}"')
+        if created_before:
+            formatted_date = _format_cql_date_with_offset(created_before, time_offset_hours)
+            cql_parts.append(f'created < "{formatted_date}"')
+
+        # Combine filters
+        cql_query = " AND ".join(cql_parts)
+
+        # Add ordering only if both order_by and sort_order are specified
+        if order_by is not None or sort_order is not None:
+            if order_by is None or sort_order is None:
+                raise ValueError("Both order_by and sort_order must be specified together, or neither")
+            cql_query += f" order by {order_by} {sort_order}"
+
+        _query["cql"] = cql_query
+
+        # Handle pagination cursor
+        if cursor:
+            _query["cursor"] = cursor
+
+        # v1 API uses /wiki/rest/api instead of /wiki/api/v2
+        v1_base_url = self.base_url.split('/wiki')[0] + '/wiki'
+        rel_path = "/rest/api/content/search"
+        url = v1_base_url + rel_path
+
+        req = HTTPRequest(
+            method="GET",
+            url=url,
+            headers=_as_str_dict(_headers),
+            path={},
+            query=_as_str_dict(_query),
+            body=None,
+        )
+
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_page_permissions_v1(
+        self,
+        page_id: str,
+        expand: Optional[str] = None,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Fetch page permissions using v1 content API.
+
+        Args:
+            page_id: The page ID
+            expand: Properties to expand (default includes user/group details)
+
+        Returns:
+            HTTPResponse containing restrictions data
+        """
+        if self._client is None:
+            raise ValueError("HTTP client is not initialized")
+        _headers: Dict[str, Any] = dict(headers or {})
+
+        if expand:
+            _query: Dict[str, Any] = {"expand": expand}
+        else:
+            _query: Dict[str, Any] = {}
+        _path: Dict[str, Any] = {"id": page_id}
+
+        # v1 API uses /wiki/rest/api instead of /wiki/api/v2
+        v1_base_url = self.base_url.split('/wiki')[0] + '/wiki'
+        rel_path = "/rest/api/content/{id}/restriction"
+        url = v1_base_url + _safe_format_url(rel_path, _path)
+
+        req = HTTPRequest(
+            method="GET",
+            url=url,
+            headers=_as_str_dict(_headers),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
+            body=None,
+        )
+
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_page_content_v1(
+        self,
+        page_id: str,
+        expand: str = "body.storage,version,space",
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Fetch page content using v1 content API with expand parameter.
+
+        Args:
+            page_id: The page ID
+            expand: Comma-separated properties to expand
+
+        Returns:
+            HTTPResponse containing page data with expanded properties
+        """
+        if self._client is None:
+            raise ValueError("HTTP client is not initialized")
+        _headers: Dict[str, Any] = dict(headers or {})
+
+        _query: Dict[str, Any] = {"expand": expand}
+        _path: Dict[str, Any] = {"id": page_id}
+
+        # v1 API uses /wiki/rest/api instead of /wiki/api/v2
+        v1_base_url = self.base_url.split('/wiki')[0] + '/wiki'
+        rel_path = "/rest/api/content/{id}"
+        url = v1_base_url + _safe_format_url(rel_path, _path)
+
+        req = HTTPRequest(
+            method="GET",
+            url=url,
+            headers=_as_str_dict(_headers),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
+            body=None,
+        )
+
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_page_content_v2(
+        self,
+        page_id: str,
+        body_format: str = "storage",
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Fetch page content using v2 pages API with body-format parameter.
+
+        Args:
+            page_id: The page ID
+            body_format: Format for body content (storage, atlas_doc_format, etc.)
+
+        Returns:
+            HTTPResponse containing page data with formatted body
+        """
+        if self._client is None:
+            raise ValueError("HTTP client is not initialized")
+        _headers: Dict[str, Any] = dict(headers or {})
+
+        _query: Dict[str, Any] = {"body-format": body_format}
+        _path: Dict[str, Any] = {"id": page_id}
+
+        rel_path = "/pages/{id}"
+        url = self.base_url + _safe_format_url(rel_path, _path)
+
+        req = HTTPRequest(
+            method="GET",
+            url=url,
+            headers=_as_str_dict(_headers),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
+            body=None,
+        )
+
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_blogpost_content_v2(
+        self,
+        blogpost_id: str,
+        body_format: str = "export_view",
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Fetch blogpost content using v2 blogposts API with body-format parameter.
+
+        Args:
+            blogpost_id: The blogpost ID
+            body_format: Format for body content (export_view, storage, atlas_doc_format, etc.)
+
+        Returns:
+            HTTPResponse containing blogpost data with formatted body
+        """
+        if self._client is None:
+            raise ValueError("HTTP client is not initialized")
+        _headers: Dict[str, Any] = dict(headers or {})
+
+        _query: Dict[str, Any] = {"body-format": body_format}
+        _path: Dict[str, Any] = {"id": blogpost_id}
+
+        rel_path = "/blogposts/{id}"
+        url = self.base_url + _safe_format_url(rel_path, _path)
+
+        req = HTTPRequest(
+            method="GET",
+            url=url,
+            headers=_as_str_dict(_headers),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
+            body=None,
+        )
+
         resp = await self._client.execute(req)
         return resp
 
@@ -1968,8 +2383,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2037,8 +2452,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2065,8 +2480,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2098,8 +2513,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2143,8 +2558,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2184,8 +2599,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2223,8 +2638,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2250,8 +2665,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2283,8 +2698,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2310,8 +2725,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2349,8 +2764,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2383,8 +2798,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2412,8 +2827,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2451,8 +2866,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2480,8 +2895,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2508,8 +2923,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2536,8 +2951,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2564,8 +2979,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2603,8 +3018,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2631,8 +3046,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2670,8 +3085,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2697,8 +3112,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2736,8 +3151,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2770,8 +3185,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2799,8 +3214,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2838,8 +3253,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2867,8 +3282,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2894,8 +3309,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2930,8 +3345,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2966,8 +3381,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -2996,8 +3411,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3024,8 +3439,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3063,8 +3478,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3090,8 +3505,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3129,8 +3544,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3163,8 +3578,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3192,8 +3607,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3231,8 +3646,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3260,8 +3675,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3287,8 +3702,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3323,8 +3738,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3359,8 +3774,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3389,8 +3804,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3414,8 +3829,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3453,8 +3868,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3480,8 +3895,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3519,8 +3934,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3553,8 +3968,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3582,8 +3997,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3621,8 +4036,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3650,8 +4065,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3677,8 +4092,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3713,8 +4128,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3749,8 +4164,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3779,8 +4194,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3804,8 +4219,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3843,8 +4258,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3870,8 +4285,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3909,8 +4324,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3943,8 +4358,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -3972,8 +4387,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4011,8 +4426,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4040,8 +4455,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4067,8 +4482,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4103,8 +4518,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4139,8 +4554,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4169,8 +4584,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4198,8 +4613,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4237,8 +4652,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4266,8 +4681,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4326,8 +4741,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4351,8 +4766,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4399,8 +4814,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4444,8 +4859,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4483,8 +4898,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4522,8 +4937,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4560,8 +4975,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4587,8 +5002,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4596,7 +5011,7 @@ class ConfluenceDataSource:
 
     async def get_pages_in_space(
         self,
-        id: int,
+        id: str,
         depth: Optional[str] = None,
         sort: Optional[Dict[str, Any]] = None,
         status: Optional[list[str]] = None,
@@ -4635,8 +5050,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4671,8 +5086,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4705,8 +5120,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4734,8 +5149,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4773,8 +5188,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4802,8 +5217,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4835,8 +5250,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4865,8 +5280,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
 
@@ -4908,8 +5323,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4935,8 +5350,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -4959,8 +5374,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5004,8 +5419,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5032,8 +5447,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5074,8 +5489,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5119,8 +5534,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5161,8 +5576,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5206,8 +5621,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5242,8 +5657,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5285,8 +5700,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5333,8 +5748,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5370,8 +5785,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5397,8 +5812,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5436,8 +5851,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5463,8 +5878,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5496,8 +5911,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5523,8 +5938,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5562,8 +5977,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5591,8 +6006,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5627,8 +6042,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5667,8 +6082,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5715,8 +6130,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5752,8 +6167,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5779,8 +6194,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5818,8 +6233,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5845,8 +6260,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5878,8 +6293,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5905,8 +6320,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5944,8 +6359,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -5973,8 +6388,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6012,8 +6427,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6046,8 +6461,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6075,8 +6490,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6114,8 +6529,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6143,8 +6558,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6221,8 +6636,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6251,8 +6666,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6282,8 +6697,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6318,8 +6733,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6354,8 +6769,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6390,8 +6805,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6420,8 +6835,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6456,8 +6871,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6481,8 +6896,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6506,8 +6921,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6531,8 +6946,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6555,8 +6970,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6594,8 +7009,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6618,8 +7033,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6645,8 +7060,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6673,8 +7088,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6700,8 +7115,8 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6730,8 +7145,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6758,8 +7173,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6786,8 +7201,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6816,8 +7231,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6844,8 +7259,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6872,8 +7287,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6899,8 +7314,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6927,8 +7342,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6955,8 +7370,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -6982,8 +7397,8 @@ class ConfluenceDataSource:
             method='GET',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -7010,8 +7425,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -7038,8 +7453,8 @@ class ConfluenceDataSource:
             method='POST',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -7067,8 +7482,8 @@ class ConfluenceDataSource:
             method='PUT',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
@@ -7094,14 +7509,342 @@ class ConfluenceDataSource:
             method='DELETE',
             url=url,
             headers=_as_str_dict(_headers),
-            path_params=_as_str_dict(_path),
-            query_params=_as_str_dict(_query),
+            path=_as_str_dict(_path),
+            query=_as_str_dict(_query),
             body=_body,
         )
         resp = await self._client.execute(req)
         return resp
 
+    async def get_groups(
+        self,
+        start: Optional[int] = None,
+        limit: Optional[int] = None,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Get groups with offset-based pagination
+
+        HTTP GET /wiki/rest/api/group
+
+        Args:
+            start: Starting index for pagination (default: 0)
+            limit: Number of results per page (default: 200)
+            headers: Additional headers
+
+        Returns:
+            HTTPResponse with group data
+        """
+        if self._client is None:
+            raise ValueError('HTTP client is not initialized')
+
+        _headers: Dict[str, Any] = dict(headers or {})
+        _query: Dict[str, Any] = {}
+
+        if start is not None:
+            _query['start'] = start
+        if limit is not None:
+            _query['limit'] = limit
+
+        # Use REST API base URL (not v2)
+        rest_base_url = self.base_url.replace('/wiki/api/v2', '/wiki/rest/api')
+        url = f"{rest_base_url}/group"
+
+        req = HTTPRequest(
+            method='GET',
+            url=url,
+            headers=_as_str_dict(_headers),
+            path={},
+            query=_as_str_dict(_query),
+            body=None,
+        )
+        resp = await self._client.execute(req)
+        return resp
+
+    async def search_users(
+        self,
+        cql: Optional[str] = None,
+        start: Optional[int] = None,
+        limit: Optional[int] = None,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Search users with CQL query
+
+        HTTP GET /wiki/rest/api/search/user
+
+        Args:
+            cql: CQL query string (e.g., "type=user")
+            start: Starting index for pagination (default: 0)
+            limit: Number of results per page (default: 1000)
+            headers: Additional headers
+
+        Returns:
+            HTTPResponse with user search results
+        """
+        if self._client is None:
+            raise ValueError('HTTP client is not initialized')
+
+        _headers: Dict[str, Any] = dict(headers or {})
+        _query: Dict[str, Any] = {}
+
+        if cql is not None:
+            _query['cql'] = cql
+        if start is not None:
+            _query['start'] = start
+        if limit is not None:
+            _query['limit'] = limit
+
+        # Use REST API base URL (not v2)
+        rest_base_url = self.base_url.replace('/wiki/api/v2', '/wiki/rest/api')
+        url = f"{rest_base_url}/search/user"
+
+        req = HTTPRequest(
+            method='GET',
+            url=url,
+            headers=_as_str_dict(_headers),
+            path={},
+            query=_as_str_dict(_query),
+            body=None,
+        )
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_group_members(
+        self,
+        group_id: str,
+        start: Optional[int] = None,
+        limit: Optional[int] = None,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Get members of a specific group
+
+        HTTP GET /wiki/rest/api/group/{group_id}/membersByGroupId
+
+        Args:
+            group_id: The group ID
+            start: Starting index for pagination (default: 0)
+            limit: Number of results per page (default: 200)
+            headers: Additional headers
+
+        Returns:
+            HTTPResponse with group member data
+        """
+        if self._client is None:
+            raise ValueError('HTTP client is not initialized')
+
+        _headers: Dict[str, Any] = dict(headers or {})
+        _query: Dict[str, Any] = {}
+
+        if start is not None:
+            _query['start'] = start
+        if limit is not None:
+            _query['limit'] = limit
+
+        # Use REST API base URL (not v2)
+        rest_base_url = self.base_url.replace('/wiki/api/v2', '/wiki/rest/api')
+        url = f"{rest_base_url}/group/{group_id}/membersByGroupId"
+
+        req = HTTPRequest(
+            method='GET',
+            url=url,
+            headers=_as_str_dict(_headers),
+            path={},
+            query=_as_str_dict(_query),
+            body=None,
+        )
+        resp = await self._client.execute(req)
+        return resp
+
+    async def get_audit_logs(
+        self,
+        start_date: Optional[int] = None,
+        end_date: Optional[int] = None,
+        start: int = 0,
+        limit: int = 1000,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Fetch audit logs from Confluence with date range filtering.
+
+        Uses the Confluence REST API audit endpoint to retrieve audit records.
+        This is useful for tracking permission changes that don't update
+        the page's lastModified timestamp.
+
+        HTTP GET /wiki/rest/api/audit
+
+        Args:
+            start_date: Start of date range in milliseconds (Unix epoch * 1000)
+            end_date: End of date range in milliseconds (Unix epoch * 1000)
+            start: Pagination offset (default: 0)
+            limit: Number of results per page (default: 1000, max: 1000)
+            headers: Additional headers
+
+        Returns:
+            HTTPResponse with audit log records in format:
+            {
+                "results": [
+                    {
+                        "author": {"displayName": "...", "accountId": "..."},
+                        "creationDate": 1764074955065,
+                        "summary": "Content restriction added",
+                        "category": "Permissions",
+                        "affectedObject": {"name": "...", "objectType": "User|Group"},
+                        "changedValues": [...],
+                        "associatedObjects": [
+                            {"name": "Page Title", "objectType": "Page|Blog"},
+                            {"name": "Space Name", "objectType": "Space"}
+                        ]
+                    }
+                ],
+                "start": 0,
+                "limit": 1000,
+                "size": 100,
+                "_links": {...}
+            }
+        """
+        if self._client is None:
+            raise ValueError('HTTP client is not initialized')
+
+        _headers: Dict[str, Any] = dict(headers or {})
+        _query: Dict[str, Any] = {
+            'start': start,
+            'limit': limit,
+        }
+
+        if start_date is not None:
+            _query['startDate'] = start_date
+        if end_date is not None:
+            _query['endDate'] = end_date
+
+        # Use REST API base URL (not v2)
+        rest_base_url = self.base_url.replace('/wiki/api/v2', '/wiki/rest/api')
+        url = f"{rest_base_url}/audit"
+
+        req = HTTPRequest(
+            method='GET',
+            url=url,
+            headers=_as_str_dict(_headers),
+            path={},
+            query=_as_str_dict(_query),
+            body=None,
+        )
+        resp = await self._client.execute(req)
+        return resp
+
+    async def search_content_by_titles(
+        self,
+        titles: list[str],
+        content_type: Optional[str] = None,
+        expand: str = "version,space,history.lastUpdated,ancestors",
+        limit: int = 200,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> HTTPResponse:
+        """Search for content (pages/blogs) by their titles using CQL.
+
+        Uses the Confluence REST API content search endpoint with CQL query
+        to find pages and blogposts by their titles.
+
+        HTTP GET /wiki/rest/api/content/search
+
+        Args:
+            titles: List of content titles to search for
+            content_type: Filter by type - "page", "blogpost", or None for both
+            expand: Comma-separated properties to expand
+            limit: Max results to return (default: 200)
+            headers: Additional headers
+
+        Returns:
+            HTTPResponse with matching content items
+
+        Example:
+            # Search for specific pages
+            response = await datasource.search_content_by_titles(
+                titles=["My Page", "Another Page"],
+                content_type="page"
+            )
+        """
+        if self._client is None:
+            raise ValueError('HTTP client is not initialized')
+
+        if not titles:
+            raise ValueError('At least one title is required')
+
+        _headers: Dict[str, Any] = dict(headers or {})
+
+        # Build CQL query: title IN ("Title1", "Title2", ...)
+        # Escape quotes in titles
+        escaped_titles = [title.replace('"', '\\"') for title in titles]
+        titles_str = ', '.join(f'"{title}"' for title in escaped_titles)
+        cql = f'title IN ({titles_str})'
+
+        # Add content type filter if specified
+        if content_type:
+            cql = f'{cql} AND type="{content_type}"'
+
+        _query: Dict[str, Any] = {
+            'cql': cql,
+            'limit': limit,
+        }
+
+        if expand:
+            _query['expand'] = expand
+
+        # Use REST API v1 for content search
+        v1_base_url = self.base_url.split('/wiki')[0] + '/wiki'
+        url = f"{v1_base_url}/rest/api/content/search"
+
+        req = HTTPRequest(
+            method='GET',
+            url=url,
+            headers=_as_str_dict(_headers),
+            path={},
+            query=_as_str_dict(_query),
+            body=None,
+        )
+        resp = await self._client.execute(req)
+        return resp
+
 # ---- Helpers used by generated methods ----
+
+def _format_cql_date_with_offset(iso_date: str, offset_hours: int = 0) -> str:
+    """Convert ISO 8601 datetime to CQL format with an optional time offset.
+
+    This helper converts ISO dates to CQL format and optionally applies an offset,
+    useful for handling timezone differences between app and Confluence server.
+
+    Args:
+        iso_date: ISO 8601 formatted datetime string (e.g., "2025-01-15T10:30:00Z")
+        offset_hours: Hours to subtract from the date (default: 0, no offset).
+                      Positive values: go back in time (for 'after' filters).
+                      Negative values: go forward in time (for 'before' filters).
+
+    Returns:
+        CQL-formatted date string: "yyyy-MM-dd HH:mm"
+
+    Example:
+        # No offset - use date as-is
+        date = _format_cql_date_with_offset("2025-01-15T10:30:00Z")
+        # Returns: "2025-01-15 10:30"
+
+        # For 'modified_after' filter, subtract 24 hours to ensure no data is missed
+        date = _format_cql_date_with_offset("2025-01-15T10:30:00Z", 24)
+        # Returns: "2025-01-14 10:30"
+
+        # For 'modified_before' filter, add 24 hours
+        date = _format_cql_date_with_offset("2025-01-15T10:30:00Z", -24)
+        # Returns: "2025-01-16 10:30"
+    """
+    # Parse the ISO date string
+    if iso_date.endswith('Z'):
+        dt = datetime.fromisoformat(iso_date.replace('Z', '+00:00'))
+    else:
+        dt = datetime.fromisoformat(iso_date)
+
+    # Apply offset (positive = go back, negative = go forward)
+    dt_adjusted = dt - timedelta(hours=offset_hours)
+
+    # Format to CQL date format: yyyy-MM-dd HH:mm
+    return dt_adjusted.strftime("%Y-%m-%d %H:%M")
+
+
 def _safe_format_url(template: str, params: Dict[str, object]) -> str:
     class _SafeDict(dict):
         def __missing__(self, key: str) -> str:

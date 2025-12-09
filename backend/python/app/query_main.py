@@ -15,11 +15,11 @@ from app.api.middlewares.auth import authMiddleware
 from app.api.routes.agent import router as agent_router
 from app.api.routes.chatbot import router as chatbot_router
 from app.api.routes.health import router as health_router
-from app.api.routes.records import router as records_router
 from app.api.routes.search import router as search_router
 from app.config.constants.http_status_code import HttpStatusCode
 from app.config.constants.service import DefaultEndpoints, config_node_constants
 from app.containers.query import QueryAppContainer
+from app.health.health import Health
 from app.services.graph_db.arango.config import ArangoConfig
 from app.services.messaging.kafka.utils.utils import KafkaUtils
 from app.services.messaging.messaging_factory import MessagingFactory
@@ -34,16 +34,16 @@ async def initialize_container(container: QueryAppContainer) -> bool:
     logger.info("🚀 Initializing application resources")
 
     try:
-        # Connect to ArangoDB and Redis
-        logger.info("Connecting to ArangoDB")
+        # Ensure connector service is healthy before starting query service
+        logger.info("Checking Connector service health before startup")
+        await Health.health_check_connector_service(container)
+
+        # Ensure ArangoDB service is initialized (connection is handled in the resource factory)
+        logger.info("Ensuring ArangoDB service is initialized")
         arango_service = await container.arango_service()
-        if arango_service:
-            arango_connected = await arango_service.connect()
-            if not arango_connected:
-                raise Exception("Failed to connect to ArangoDB")
-            logger.info("✅ Connected to ArangoDB")
-        else:
-            raise Exception("Failed to connect to ArangoDB")
+        if not arango_service:
+            raise Exception("Failed to initialize ArangoDB service")
+        logger.info("✅ ArangoDB service initialized")
 
         return True
 
@@ -60,8 +60,7 @@ async def get_initialized_container() -> QueryAppContainer:
             modules=[
                 "app.api.routes.search",
                 "app.api.routes.chatbot",
-                "app.modules.retrieval.retrieval_service",
-                "app.modules.retrieval.retrieval_arango",
+                "app.modules.retrieval.retrieval_service"
             ]
         )
         get_initialized_container.initialized = True
@@ -169,7 +168,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Use the warmup class to import all tools automatically
     logger.info("Using tools warmup to register all available tools...")
-    from app.agents.tools.tools_discovery import discover_tools
+    from app.agents.tools.discovery import discover_tools
 
     discovery_results = discover_tools(logger)
     logger.info(f"Discovery completed: {discovery_results['total_tools']} tools registered")
@@ -304,8 +303,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
     try:
         # Try to log the request body
-        body = await request.json()
-        print(f"Failing request body: {body}")
+        await request.json()
     except Exception:
         print("Could not parse request body as JSON.")
 
@@ -320,7 +318,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Include routes from routes.py
 app.include_router(search_router, prefix="/api/v1")
 app.include_router(chatbot_router, prefix="/api/v1")
-app.include_router(records_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1/agent")
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(tools_router, prefix="/api/v1")

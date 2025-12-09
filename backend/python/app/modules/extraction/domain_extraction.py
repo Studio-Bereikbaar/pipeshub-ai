@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from typing import List, Literal
@@ -30,12 +31,38 @@ from app.config.constants.service import (
     config_node_constants,
 )
 from app.modules.extraction.prompt_template import prompt
-from app.modules.transformers.document_extraction import DocumentClassification
+from app.modules.transformers.document_extraction import (
+    DEFAULT_CONTEXT_LENGTH,
+    DocumentClassification,
+)
+from app.utils.chat_helpers import count_tokens_text
 from app.utils.llm import get_llm
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 # Update the Literal types
 SentimentType = Literal["Positive", "Neutral", "Negative"]
+MAX_CONTENT_TOKENS = 30000
+def get_first_n_tokens(text: str, n: int) -> str:
+    """Return the first n tokens of text.
+
+    Uses tiktoken with cl100k_base when available; otherwise falls back to a
+    simple character heuristic (~4 chars per token).
+    """
+    if not text or n <= 0:
+        return ""
+    # Try tiktoken if available
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        token_ids = enc.encode(text)
+        return enc.decode(token_ids[:n])
+    except (ImportError, Exception):
+        # tiktoken not available; fall back to heuristic
+        pass
+
+    # Heuristic fallback: assume ~4 chars per token
+    approx_chars = n * 4
+    return text[:approx_chars]
 
 class SubCategories(BaseModel):
     level1: str = Field(description="Level 1 subcategory")
@@ -78,8 +105,16 @@ class DomainExtractor:
     )
 
     async def _call_llm(self, messages) -> dict | None:
-        """Wrapper for LLM calls with retry logic"""
-        return await self.llm.ainvoke(messages)
+        """Wrapper for LLM calls with retry logic and timeout"""
+        try:
+            # Add a 300 second (5 minute) timeout to prevent indefinite hanging
+            return await asyncio.wait_for(
+                self.llm.ainvoke(messages),
+                timeout=300.0
+            )
+        except asyncio.TimeoutError:
+            self.logger.error("❌ LLM call timed out after 300 seconds")
+            raise
 
     async def find_similar_topics(self, new_topic: str) -> str:
         """
@@ -168,7 +203,15 @@ class DomainExtractor:
         Includes reflection logic to attempt recovery from parsing failures.
         """
         self.logger.info("🎯 Extracting domain metadata")
-        self.llm, _ = await get_llm(self.config_service)
+        try:
+            self.llm, config = await get_llm(self.config_service)
+            context_length = config.get("contextLength") or DEFAULT_CONTEXT_LENGTH
+            self.logger.info(f"Context length: {context_length}")
+
+            self.logger.info("✅ LLM initialized successfully")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to initialize LLM: {str(e)}")
+            raise
 
         try:
             self.logger.info(f"🎯 Extracting departments for org_id: {org_id}")
@@ -188,13 +231,22 @@ class DomainExtractor:
                 "{department_list}", department_list
             ).replace("{sentiment_list}", sentiment_list)
             self.prompt_template = PromptTemplate.from_template(filled_prompt)
+            token_count = count_tokens_text(content,None)
+
+            MAX_CONTENT_TOKENS = int(context_length * 0.85)
+
+            if token_count > MAX_CONTENT_TOKENS:
+                self.logger.info("🎯 Prompt exceeds MAX_CONTENT_TOKENS tokens, truncating content")
+                content = get_first_n_tokens(content,MAX_CONTENT_TOKENS)
 
             formatted_prompt = self.prompt_template.format(content=content)
             self.logger.info("🎯 Prompt formatted successfully")
 
             messages = [HumanMessage(content=formatted_prompt)]
             # Use retry wrapper for LLM call
+            self.logger.info("🚀 Making LLM call for domain metadata extraction")
             response = await self._call_llm(messages)
+            self.logger.info("✅ LLM call completed successfully")
             # Remove any thinking tags if present
             if '</think>' in response.content:
                 response.content = response.content.split('</think>')[-1]
@@ -245,7 +297,9 @@ class DomainExtractor:
                     ]
 
                     # Use retry wrapper for reflection LLM call
+                    self.logger.info("🔄 Making reflection LLM call to fix validation issues")
                     reflection_response = await self._call_llm(reflection_messages)
+                    self.logger.info("✅ Reflection LLM call completed successfully")
                     if '</think>' in reflection_response.content:
                         reflection_response.content = reflection_response.content.split('</think>')[-1]
                     reflection_text = reflection_response.content.strip()

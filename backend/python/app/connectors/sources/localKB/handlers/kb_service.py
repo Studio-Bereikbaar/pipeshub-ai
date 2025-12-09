@@ -6,10 +6,8 @@ from app.config.constants.arangodb import (
     CollectionNames,
     Connectors,
 )
+from app.connectors.services.base_arango_service import BaseArangoService
 from app.connectors.services.kafka_service import KafkaService
-from app.connectors.sources.localKB.core.arango_service import (
-    KnowledgeBaseArangoService,
-)
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 
@@ -19,7 +17,7 @@ class KnowledgeBaseService :
     def __init__(
         self,
         logger,
-        arango_service : KnowledgeBaseArangoService,
+        arango_service : BaseArangoService,
         kafka_service : KafkaService
     ) -> None:
         self.logger = logger
@@ -67,7 +65,7 @@ class KnowledgeBaseService :
                         CollectionNames.FILES.value,
                         CollectionNames.IS_OF_TYPE.value,
                         CollectionNames.BELONGS_TO.value,
-                        CollectionNames.PERMISSIONS_TO_KB.value,
+                        CollectionNames.PERMISSION.value,
                     ]
                 )
                 self.logger.info("🔄 Transaction created")
@@ -923,22 +921,26 @@ class KnowledgeBaseService :
             self.logger.info(f"🚀 Creating {role} permissions for {len(user_ids)} users and {len(team_ids)} teams on KB {kb_id}")
 
             # Step 1: Validate inputs early
-            valid_roles = ["OWNER", "ORGANIZER", "FILEORGANIZER", "WRITER", "COMMENTER", "READER"]
-            if role not in valid_roles:
-                return {"success": False, "reason": f"Invalid role: {role}", "code": 400}
+            unique_users = list(set(user_ids)) if user_ids else []
+            unique_teams = list(set(team_ids)) if team_ids else []
 
-            unique_users = list(set(user_ids))
-            unique_teams = list(set(team_ids))
             if not unique_users and not unique_teams:
                 return {"success": False, "reason": "No users or teams provided", "code": 400}
 
+            # Role is required for users, but not for teams (teams don't have roles)
+            if unique_users:
+                valid_roles = ["OWNER", "ORGANIZER", "FILEORGANIZER", "WRITER", "COMMENTER", "READER"]
+                if not role or role not in valid_roles:
+                    return {"success": False, "reason": f"Invalid role: {role}. Role is required for users.", "code": 400}
+
             # Step 2: Single AQL query to do everything at once
+            # Pass role even if only teams (it will be ignored for teams)
             result = await self.arango_service.create_kb_permissions(
                 kb_id=kb_id,
                 requester_id=requester_id,
                 user_ids=unique_users,
                 team_ids=unique_teams,
-                role=role
+                role=role if role else "READER"  # Default for teams (won't be used)
             )
 
             if result.get("success"):
@@ -969,6 +971,15 @@ class KnowledgeBaseService :
                 return {
                     "success": False,
                     "reason": "No users or teams provided for permission update",
+                    "code": "400"
+                }
+
+            # Teams don't have roles - they just have access or not
+            # So we can only update user permissions, not team permissions
+            if team_ids:
+                return {
+                    "success": False,
+                    "reason": "Teams don't have roles. Only user permissions can be updated.",
                     "code": "400"
                 }
 
@@ -1513,7 +1524,8 @@ class KnowledgeBaseService :
                 "canUpload": user_role in ["OWNER", "WRITER"],
                 "canCreateFolders": user_role in ["OWNER", "WRITER"],
                 "canEdit": user_role in ["OWNER", "WRITER", "FILEORGANIZER"],
-                "canDelete": user_role in ["OWNER"]
+                "canDelete": user_role in ["OWNER"],
+                "canManagePermissions": user_role in ["OWNER"]
             }
 
             result["pagination"] = {
@@ -1621,7 +1633,8 @@ class KnowledgeBaseService :
                 "canUpload": user_role in ["OWNER", "WRITER"],
                 "canCreateFolders": user_role in ["OWNER", "WRITER"],
                 "canEdit": user_role in ["OWNER", "WRITER", "FILEORGANIZER"],
-                "canDelete": user_role in ["OWNER"]
+                "canDelete": user_role in ["OWNER"],
+                "canManagePermissions": user_role in ["OWNER"]
             }
 
             result["pagination"] = {

@@ -2,6 +2,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
+from app.connectors.core.registry.filters import FilterCategory, FilterField, FilterType
+
 
 @dataclass
 class AuthField:
@@ -16,19 +18,6 @@ class AuthField:
     min_length: int = 10
     max_length: int = 1000
     is_secret: bool = False
-
-
-@dataclass
-class FilterField:
-    """Represents a filter field"""
-    name: str
-    display_name: str
-    field_type: str = "MULTISELECT"
-    description: str = ""
-    required: bool = False
-    default_value: Any = field(default_factory=list)
-    options: List[str] = field(default_factory=list)
-    operators: List[str] = field(default_factory=lambda: ["IN", "NOT_IN"])
 
 
 @dataclass
@@ -51,7 +40,7 @@ class DocumentationLink:
     """Represents a documentation link"""
     title: str
     url: str
-    doc_type: str = "setup"
+    doc_type: str
 
 
 class ConnectorConfigBuilder:
@@ -106,11 +95,14 @@ class ConnectorConfigBuilder:
                 "values": {}
             },
             "filters": {
-                "schema": {"fields": []},
-                "values": {},
-                "customFields": [],
-                "customValues": {},
-                "endpoints": {}
+                "sync": {
+                    "schema": {"fields": []},
+                    "values": {}
+                },
+                "indexing": {
+                    "schema": {"fields": []},
+                    "values": {}
+                }
             }
         }
         return self
@@ -154,6 +146,10 @@ class ConnectorConfigBuilder:
 
     def add_auth_field(self, field: AuthField) -> 'ConnectorConfigBuilder':
         """Add an authentication field"""
+
+        if field.field_type == "CHECKBOX":
+            field.min_length = 0
+
         field_config = {
             "name": field.name,
             "displayName": field.display_name,
@@ -226,21 +222,22 @@ class ConnectorConfigBuilder:
         self.config["sync"]["customFields"].append(field_config)
         return self
 
-    def add_filter_field(self, field: FilterField, endpoint: str = "static") -> 'ConnectorConfigBuilder':
-        """Add a filter field"""
-        field_config = {
-            "name": field.name,
-            "displayName": field.display_name,
-            "description": field.description,
-            "fieldType": field.field_type,
-            "required": field.required,
-            "defaultValue": field.default_value,
-            "options": field.options,
-            "operators": field.operators
-        }
+    def add_filter_field(self, field: FilterField) -> 'ConnectorConfigBuilder':
+        """
+        Add a filter field to the connector schema.
 
-        self.config["filters"]["schema"]["fields"].append(field_config)
-        self.config["filters"]["endpoints"][field.name] = endpoint
+        The field will be added to either sync or indexing category
+        based on field.category.
+
+        Args:
+            field: FilterField definition with type, operators, category
+        """
+        schema_dict = field.to_schema_dict()
+        category = field.category.value  # "sync" or "indexing"
+
+        # Add to appropriate category schema
+        self.config["filters"][category]["schema"]["fields"].append(schema_dict)
+
         return self
 
     def add_conditional_display(self, field_name: str, show_when_field: str, operator: str, value: Union[str, bool, int, float]) -> 'ConnectorConfigBuilder':
@@ -303,6 +300,10 @@ class ConnectorBuilder:
 
         config = self.config_builder.build()
 
+        # Validate OAuth requirements when applicable
+        if self.auth_type and self.auth_type.upper() == "OAUTH":
+            self._validate_oauth_requirements(config)
+
         return Connector(
             name=self.name,
             app_group=self.app_group,
@@ -311,6 +312,43 @@ class ConnectorBuilder:
             app_categories=self.app_categories,
             config=config
         )
+
+    def _validate_oauth_requirements(self, config: Dict[str, Any]) -> None:
+        """Ensure required OAuth fields are provided for OAuth connectors.
+
+        Required:
+        - authorizeUrl
+        - tokenUrl
+        - redirectUri
+        - scopes (non-empty list)
+        - auth schema includes fields: clientId, clientSecret
+        """
+        auth_config = config.get("auth", {})
+
+        missing_items = []
+
+        required_urls = ["authorizeUrl", "tokenUrl", "redirectUri"]
+        for url_key in required_urls:
+            if not auth_config.get(url_key):
+                missing_items.append(url_key)
+
+        scopes = auth_config.get("scopes")
+        if not isinstance(scopes, list) or not scopes:
+            missing_items.append("scopes")
+
+        # Validate presence of clientId and clientSecret in auth schema fields
+        schema_fields = auth_config.get("schema", {}).get("fields", [])
+        field_names = {f.get("name") for f in schema_fields if isinstance(f, dict)}
+        required_schema_fields = {"clientId", "clientSecret"}
+        missing_fields = required_schema_fields - field_names
+        for field_name in sorted(list(missing_fields)):
+            missing_items.append(f"auth.schema.fields: {field_name}")
+
+        if missing_items:
+            details = ", ".join(missing_items)
+            raise ValueError(
+                f"OAuth configuration incomplete for connector '{self.name}': missing {details}"
+            )
 
 
 # Common field definitions that can be reused
@@ -353,6 +391,19 @@ class CommonFields:
         )
 
     @staticmethod
+    def bearer_token(token_name: str = "Bearer Token", placeholder: str = "") -> AuthField:
+        """Standard Bearer token field"""
+        return AuthField(
+            name="bearerToken",
+            display_name=token_name,
+            placeholder=placeholder or f"Enter your {token_name}",
+            description=f"The {token_name} from your application settings",
+            field_type="PASSWORD",
+            max_length=8000,
+            is_secret=True
+        )
+
+    @staticmethod
     def username() -> AuthField:
         """Standard username field"""
         return AuthField(
@@ -390,31 +441,62 @@ class CommonFields:
         )
 
     @staticmethod
-    def file_types_filter() -> FilterField:
+    def file_types_filter(options_endpoint: Optional[str] = None) -> FilterField:
         """Standard file types filter"""
         return FilterField(
             name="fileTypes",
             display_name="File Types",
+            filter_type=FilterType.LIST,
+            category=FilterCategory.SYNC,
             description="Select the types of files to sync",
-            options=["document", "spreadsheet", "presentation", "pdf", "image", "video"]
+            options=["document", "spreadsheet", "presentation", "pdf", "image", "video"],
+            options_endpoint=options_endpoint
         )
 
     @staticmethod
-    def folders_filter() -> FilterField:
+    def folders_filter(options_endpoint: Optional[str] = None) -> FilterField:
         """Standard folders filter"""
         return FilterField(
             name="folders",
             display_name="Folders",
-            description="Select folders to sync from"
+            filter_type=FilterType.LIST,
+            category=FilterCategory.SYNC,
+            description="Select folders to sync from",
+            options_endpoint=options_endpoint
         )
 
     @staticmethod
-    def channels_filter() -> FilterField:
+    def channels_filter(options_endpoint: Optional[str] = None) -> FilterField:
         """Standard channels filter"""
         return FilterField(
             name="channels",
             display_name="Channels",
-            description="Select channels to sync messages from"
+            filter_type=FilterType.LIST,
+            category=FilterCategory.SYNC,
+            description="Select channels to sync messages from",
+            options_endpoint=options_endpoint
+        )
+
+    @staticmethod
+    def modified_date_filter(description: Optional[str] = None) -> FilterField:
+        """Standard modified date filter with operator selection"""
+        return FilterField(
+            name="modified",
+            display_name="Modified Date",
+            filter_type=FilterType.DATETIME,
+            category=FilterCategory.SYNC,
+            description=description or "Filter content by modification date."
+        )
+
+    @staticmethod
+    def created_date_filter(description: Optional[str] = None) -> FilterField:
+        """Standard created date filter with operator selection"""
+        return FilterField(
+            name="created",
+            display_name="Created Date",
+            filter_type=FilterType.DATETIME,
+            category=FilterCategory.SYNC,
+            description=description or "Filter content by creation date."
         )
 
     @staticmethod

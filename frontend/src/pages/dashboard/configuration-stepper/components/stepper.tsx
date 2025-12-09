@@ -78,7 +78,7 @@ const CONFIGURATION_STEPS = [
       'Choose your preferred storage solution. Local storage is used by default if skipped.',
     isRequired: false,
     canSkip: true,
-    documentationUrl: 'https://docs.pipeshub.com/storage/overview',
+    documentationUrl: 'https://docs.pipeshub.com/system-overview/storage',
   },
   {
     id: 'url' as ConfigType,
@@ -90,7 +90,7 @@ const CONFIGURATION_STEPS = [
       'Set up public URLs for external integrations. These are optional but recommended for production.',
     isRequired: false,
     canSkip: true,
-    documentationUrl: 'https://docs.pipeshub.com/deployment/urls',
+    documentationUrl: 'https://docs.pipeshub.com/system-overview/internal-services',
   },
   {
     id: 'smtp' as ConfigType,
@@ -101,7 +101,7 @@ const CONFIGURATION_STEPS = [
       'Set up email delivery for notifications and alerts. This is optional but recommended.',
     isRequired: false,
     canSkip: true,
-    documentationUrl: 'https://docs.pipeshub.com/smtp/overview',
+    documentationUrl: 'https://docs.pipeshub.com/smtp',
   },
 ] as const;
 
@@ -265,18 +265,37 @@ const OnBoardingStepper: React.FC<OnBoardingStepperProps> = ({ open, onClose, on
   const prepareAiModelConfig = useCallback(
     (stepData: LlmFormValues | EmbeddingFormValues | null, configType: 'llm' | 'embedding') => {
       if (!stepData) return null;
+      let isReasoning = false;
 
-      const { providerType, modelType, _provider, ...cleanConfig } = stepData;
+      const { providerType, modelType, _provider, isMultimodal, contextLength, ...cleanConfig } = stepData;
+      if (configType === 'llm') {
+        const llmData = stepData as LlmFormValues;
+        isReasoning = Boolean(llmData.isReasoning);
+      }
       const provider = providerType || modelType;
       if (!provider) {
         console.warn(`Provider is undefined for ${configType} configuration`);
         return null;
       }
 
+      if (configType === 'llm') {
+        return [
+          {
+            provider,
+            configuration: cleanConfig,
+            isMultimodal: Boolean(isMultimodal),
+            isReasoning: Boolean(isReasoning),
+            contextLength,
+          },
+        ];
+      }
+
       return [
         {
           provider,
           configuration: cleanConfig,
+          isMultimodal: Boolean(isMultimodal),
+          contextLength,
         },
       ];
     },
@@ -435,7 +454,8 @@ const OnBoardingStepper: React.FC<OnBoardingStepperProps> = ({ open, onClose, on
 
     // Move to next step or complete
     if (activeStep < CONFIGURATION_STEPS.length - 1) {
-      setActiveStep(activeStep + 1);
+      const nextIndex = activeStep + 1;
+      setActiveStep(nextIndex);
     } else {
       // This is the last step, complete configuration with current data
       await completeConfiguration();
@@ -460,16 +480,55 @@ const OnBoardingStepper: React.FC<OnBoardingStepperProps> = ({ open, onClose, on
 
     // Move to next step or complete
     if (activeStep < CONFIGURATION_STEPS.length - 1) {
-      setActiveStep(activeStep + 1);
+      const nextIndex = activeStep + 1;
+      setActiveStep(nextIndex);
     } else {
       completeConfiguration();
     }
   };
 
+  // Robust rehydration on step change to ensure persistence across multiple navigations
+  useEffect(() => {
+    if (!open) return () => {};
+    const timer = setTimeout(async () => {
+      try {
+        const step = getCurrentStep();
+        if (!step) return;
+        const state = stepStates[step.id];
+        const ref = formRefs[step.id as keyof typeof formRefs];
+        if (ref?.current && state?.formData) {
+          await ref.current.rehydrateForm?.(state.formData);
+        }
+      } catch (e) {
+        // no-op
+      }
+    }, 80);
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeStep, open]);
+
   const handleBack = () => {
     if (activeStep > 0) {
-      setActiveStep(activeStep - 1);
+      const previousIndex = activeStep - 1;
+      setActiveStep(previousIndex);
       setSubmissionError(''); // Clear any error when going back
+
+      // After moving back, rehydrate the previous step's form with its last known data
+      setTimeout(async () => {
+        const prevStep = CONFIGURATION_STEPS[previousIndex];
+        const prevState = stepStates[prevStep.id];
+        const prevFormRef = formRefs[prevStep.id as keyof typeof formRefs];
+
+        if (prevFormRef?.current && prevState?.formData) {
+          try {
+            await prevFormRef.current.rehydrateForm?.(prevState.formData);
+          } catch (e) {
+            // no-op: do not block navigation on rehydrate
+          }
+        }
+      }, 50);
     }
   };
 
@@ -621,7 +680,12 @@ const OnBoardingStepper: React.FC<OnBoardingStepperProps> = ({ open, onClose, on
       const savePromises = configurationsToSave.map((config) =>
         config.saveFn().catch((error: any) => {
           console.error(`Error saving ${config.type}:`, error);
-          throw new Error(`Failed to save ${config.type} configuration`);
+          throw new Error(
+            error.response?.data?.error?.message ||
+              error.response?.data?.message ||
+              error.message ||
+              `Failed to save ${config.type} configuration`
+          );
         })
       );
 

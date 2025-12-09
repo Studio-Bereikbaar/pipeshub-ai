@@ -1,10 +1,9 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from logging import Logger
 from typing import Optional
 
 import aiohttp  # type: ignore
-from jose import jwt  # type: ignore
 from tenacity import retry, stop_after_attempt, wait_exponential  # type: ignore
 
 from app.config.configuration_service import ConfigurationService
@@ -14,9 +13,9 @@ from app.config.constants.arangodb import (
     ExtensionTypes,
     MimeTypes,
     ProgressStatus,
+    RecordTypes,
 )
-from app.config.constants.http_status_code import HttpStatusCode
-from app.config.constants.service import config_node_constants
+from app.config.constants.service import DefaultEndpoints, config_node_constants
 from app.events.events import EventProcessor
 from app.exceptions.indexing_exceptions import IndexingError
 from app.services.messaging.kafka.handlers.entity import BaseEventService
@@ -24,6 +23,10 @@ from app.services.messaging.kafka.handlers.entity import BaseEventService
 # from app.connectors.sources.google.common.arango_service import ArangoService
 from app.services.scheduler.interface.scheduler import Scheduler
 from app.services.scheduler.scheduler_factory import SchedulerFactory
+from app.utils.api_call import make_api_call
+from app.utils.jwt import generate_jwt
+from app.utils.mimetype_to_extension import get_extension_from_mimetype
+from app.utils.redis_util import build_redis_url
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=15))
@@ -45,43 +48,8 @@ async def make_signed_url_api_call(signed_url: str) -> dict:
                 data = await response.read()
                 return data
     except Exception:
-        raise
+        raise Exception("Failed to make signed URL API call")
 
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=15))
-async def make_api_call(signed_url_route: str, token: str) -> dict:
-    """
-    Make an API call with the JWT token.
-
-    Args:
-        signed_url_route (str): The route to send the request to
-        token (str): The JWT token to use for authentication
-
-    Returns:
-        dict: The response from the API
-    """
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = signed_url_route
-
-            # Add the JWT to the Authorization header
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
-
-            # Make the request
-            async with session.get(url, headers=headers) as response:
-                content_type = response.headers.get("Content-Type", "").lower()
-
-                if response.status == HttpStatusCode.SUCCESS.value and "application/json" in content_type:
-                    data = await response.json()
-                    return {"is_json": True, "data": data}
-                else:
-                    data = await response.read()
-                    return {"is_json": False, "data": data}
-    except Exception:
-        raise
 
 class RecordEventHandler(BaseEventService):
     def __init__(self, logger: Logger,
@@ -103,8 +71,50 @@ class RecordEventHandler(BaseEventService):
         redis_config = config_service.get_config(config_node_constants.REDIS.value)
         if not redis_config or not isinstance(redis_config, dict):
             raise ValueError("Redis configuration not found")
-        redis_url = f"redis://{redis_config['host']}:{redis_config['port']}/{redis_config.get('db', 0)}"
+        # Build Redis URL with password if provided
+        redis_url = build_redis_url(redis_config)
         return SchedulerFactory.scheduler("redis", redis_url, logger, config_service, delay_hours=1)
+
+    async def _trigger_next_queued_duplicate(self, record_id: str, virtual_record_id) -> None:
+        try:
+            self.logger.info(f"🔍 Looking for next queued duplicate for record {record_id}")
+
+            # Find the next queued duplicate
+            next_queued_record = await self.event_processor.arango_service.find_next_queued_duplicate(record_id)
+
+            if not next_queued_record:
+                self.logger.info(f"✅ No queued duplicates found for record {record_id}")
+                return
+
+            next_record_id = next_queued_record.get("_key")
+            self.logger.info(f"🚀 Found queued duplicate: {next_record_id}, triggering indexing")
+
+            # Get file record for the queued duplicate
+            file_record = None
+            if next_queued_record.get("recordType") == RecordTypes.FILE.value:
+                file_record = await self.event_processor.arango_service.get_document(
+                    next_record_id, CollectionNames.FILES.value
+                )
+
+            # Create event payload for the queued record
+            payload = await self.event_processor.arango_service._create_reindex_event_payload(
+                next_queued_record,
+                file_record,
+            )
+
+            # Publish the event to trigger indexing
+            await self.event_processor.arango_service._publish_record_event("newRecord", payload)
+
+            self.logger.info(f"✅ Successfully triggered indexing for queued duplicate: {next_record_id}")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to trigger next queued duplicate: {str(e)}")
+            try:
+                await self.event_processor.arango_service.update_queued_duplicates_status(record_id, ProgressStatus.FAILED.value, virtual_record_id)
+            except Exception as e:
+                self.logger.warning(f"Failed to update queued duplicates status: {str(e)}")
+
+
 
     async def process_event(self, event_type: str, payload: dict) -> bool:
         start_time = datetime.now()
@@ -112,6 +122,7 @@ class RecordEventHandler(BaseEventService):
         message_id = f"{event_type}-unknown"
         error_occurred = False
         error_msg = None
+        record = None
         try:
             record_id = payload.get("recordId")
             extension = payload.get("extension", "unknown")
@@ -126,37 +137,33 @@ class RecordEventHandler(BaseEventService):
                 self.logger.error(f"Missing record_id in message {payload}")
                 return False
 
+            record = await self.event_processor.arango_service.get_document(
+                record_id, CollectionNames.RECORDS.value
+            )
 
             self.logger.info(
                 f"Processing record {record_id} with event type: {event_type}. "
-                f"Virtual Record ID: {virtual_record_id}"
+                f"Virtual Record ID: {virtual_record_id} "
                 f"Extension: {extension}, Mime Type: {mime_type}"
             )
 
             # Handle delete event
             if event_type == EventTypes.DELETE_RECORD.value:
-                self.logger.info(f"🗑️ Deleting embeddings for record {record_id}")
                 await self.event_processor.processor.indexing_pipeline.delete_embeddings(record_id, virtual_record_id)
                 return True
 
             if event_type == EventTypes.UPDATE_RECORD.value:
-                await self.scheduler.schedule_event({"eventType": event_type, "payload": payload})
-                self.logger.info(f"Scheduled update for record {record_id}")
-                record = await self.event_processor.arango_service.get_document(
-                record_id, CollectionNames.RECORDS.value
-                )
-                if record is None:
-                    self.logger.error(f"❌ Record {record_id} not found in database")
-                    return False
-                doc = dict(record)
+                # await self.scheduler.schedule_event({"eventType": event_type, "payload": payload})
+                # self.logger.info(f"Scheduled update for record {record_id}")
+                await self.event_processor.processor.indexing_pipeline.delete_embeddings(record_id, virtual_record_id)
 
-                doc.update({"isDirty": True})
+            if record is None:
+                self.logger.error(f"❌ Record {record_id} not found in database")
+                return False
 
-                docs = [doc]
-                await self.event_processor.arango_service.batch_upsert_nodes(
-                    docs, CollectionNames.RECORDS.value
-                )
-                return True
+            if virtual_record_id is None:
+                virtual_record_id = record.get("virtualRecordId")
+
 
             if extension is None and mime_type != "text/gmail_content":
                 extension = payload.get("extension", None)
@@ -165,17 +172,15 @@ class RecordEventHandler(BaseEventService):
                     if record_name and "." in record_name:
                         extension = payload["recordName"].split(".")[-1]
 
+            if (extension is None or extension == "unknown") and mime_type is not None and mime_type != "unknown":
+                derived_extension = get_extension_from_mimetype(mime_type)
+                if derived_extension:
+                    extension = derived_extension
 
             self.logger.info("🚀 Checking for mime_type")
             self.logger.info("🚀 mime_type: %s", mime_type)
             self.logger.info("🚀 extension: %s", extension)
 
-            record = await self.event_processor.arango_service.get_document(
-                record_id, CollectionNames.RECORDS.value
-            )
-            if record is None:
-                self.logger.error(f"❌ Record {record_id} not found in database")
-                return False
             doc = dict(record)
 
             if event_type == EventTypes.NEW_RECORD.value and doc.get("indexingStatus") == ProgressStatus.COMPLETED.value:
@@ -189,6 +194,13 @@ class RecordEventHandler(BaseEventService):
                 MimeTypes.GOOGLE_SHEETS.value,
                 MimeTypes.HTML.value,
                 MimeTypes.PLAIN_TEXT.value,
+                MimeTypes.PNG.value,
+                MimeTypes.JPG.value,
+                MimeTypes.JPEG.value,
+                MimeTypes.WEBP.value,
+                MimeTypes.SVG.value,
+                MimeTypes.HEIC.value,
+                MimeTypes.HEIF.value,
             ]
 
             supported_extensions = [
@@ -204,6 +216,11 @@ class RecordEventHandler(BaseEventService):
                 ExtensionTypes.MD.value,
                 ExtensionTypes.MDX.value,
                 ExtensionTypes.TXT.value,
+                ExtensionTypes.PNG.value,
+                ExtensionTypes.JPG.value,
+                ExtensionTypes.JPEG.value,
+                ExtensionTypes.WEBP.value,
+                ExtensionTypes.SVG.value,
             ]
 
             if (
@@ -247,11 +264,11 @@ class RecordEventHandler(BaseEventService):
                         "orgId": payload["orgId"],
                         "scopes": ["storage:token"],
                     }
-                    token = await self.__generate_jwt(jwt_payload)
+                    token = await generate_jwt(self.config_service, jwt_payload)
                     self.logger.debug(f"Generated JWT token for message {message_id}")
 
                     response = await make_api_call(
-                        payload["signedUrlRoute"], token
+                        route=payload["signedUrlRoute"], token=token
                     )
                     self.logger.debug(
                         f"Received signed URL response for message {message_id}"
@@ -278,11 +295,11 @@ class RecordEventHandler(BaseEventService):
                 except Exception as e:
                     error_occurred = True
                     error_msg = f"Failed to process signed URL: {str(e)}"
-                    raise
+                    raise Exception(error_msg)
 
             elif payload and payload.get("signedUrl"):
                 try:
-                    response = await make_signed_url_api_call(payload["signedUrl"])
+                    response = await make_signed_url_api_call(signed_url=payload["signedUrl"])
                     if response:
                         payload["buffer"] = response
                     event_data_for_processor = {
@@ -299,21 +316,51 @@ class RecordEventHandler(BaseEventService):
                 except Exception as e:
                     error_occurred = True
                     error_msg = f"Failed to process signed URL: {str(e)}"
-                    raise
+                    raise Exception(error_msg)
             else:
-                raise ValueError(
-                    f"No signedUrlRoute or signedUrl found in payload for message {message_id}"
-                )
+                try:
+                    jwt_payload  = {
+                        "orgId": payload["orgId"],
+                        "scopes": ["connector:signedUrl"],
+                    }
+                    token = await generate_jwt(self.config_service, jwt_payload)
+                    self.logger.debug(f"Generated JWT token for message {message_id}")
+
+                    endpoints = await self.config_service.get_config(config_node_constants.ENDPOINTS.value)
+                    connector_url = endpoints.get("connectors").get("endpoint", DefaultEndpoints.CONNECTOR_ENDPOINT.value)
+
+                    response = await make_api_call(
+                        route=f"{connector_url}/api/v1/internal/stream/record/{record_id}", token=token
+                    )
+
+                    event_data_for_processor = {
+                        "eventType": event_type,
+                        "payload": payload
+                    }
+
+                    event_data_for_processor["payload"]["buffer"] = response["data"]
+
+                    await self.event_processor.on_event(event_data_for_processor)
+                    processing_time = (datetime.now() - start_time).total_seconds()
+                    self.logger.info(
+                        f"✅ Successfully processed document for event: {event_type}. "
+                        f"Record: {record_id}, Time: {processing_time:.2f}s"
+                    )
+                    return True
+                except Exception as e:
+                    error_occurred = True
+                    error_msg = f"Failed to process signed URL: {str(e)}"
+                    raise Exception(error_msg)
         except IndexingError as e:
             error_occurred = True
             error_msg = f"❌ Indexing error for record {record_id}: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
-            raise
+            raise Exception(error_msg)
         except Exception as e:
             error_occurred = True
             error_msg = f"Error processing message {message_id}: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
-            raise
+            raise Exception(error_msg)
         finally:
             processing_time = (datetime.now() - start_time).total_seconds()
             self.logger.info(
@@ -322,55 +369,48 @@ class RecordEventHandler(BaseEventService):
             )
 
             if error_occurred and record_id:
-                await self.__update_document_status(
+                record = await self.__update_document_status(
                     record_id=record_id,
                     indexing_status=ProgressStatus.FAILED.value,
                     extraction_status=ProgressStatus.FAILED.value,
                     reason=error_msg,
                 )
+                virtual_record_id = record.get("virtualRecordId") if record else None
+                self.logger.info(f"🔄 Current record {record_id} has failed, triggering next queued duplicate")
+                await self._trigger_next_queued_duplicate(record_id,virtual_record_id)
                 return False
 
-    async def __generate_jwt(self, token_payload: dict) -> str:
-        """
-        Generate a JWT token using the jose library.
+            if record is None:
+                return
 
-        Args:
-            token_payload (dict): The payload to include in the JWT
+            record_type = record.get("recordType")
 
-        Returns:
-            str: The generated JWT token
-        """
-        # Get the JWT secret from environment variable
-        secret_keys = await self.config_service.get_config(
-            config_node_constants.SECRET_KEYS.value
-        )
-        if not secret_keys:
-            raise ValueError("SECRET_KEYS environment variable is not set")
-        scoped_jwt_secret = secret_keys.get("scopedJwtSecret") # type: ignore
-        if not scoped_jwt_secret:
-            raise ValueError("SCOPED_JWT_SECRET environment variable is not set")
+            if record_type == RecordTypes.FILE.value and event_type != EventTypes.DELETE_RECORD.value:
+                record = await self.event_processor.arango_service.get_document(
+                    record_id, CollectionNames.RECORDS.value
+                )
 
-        # Add standard claims if not present
-        if "exp" not in token_payload:
-            # Set expiration to 1 hour from now
-            token_payload["exp"] = datetime.now(timezone.utc) + timedelta(hours=1)
+                if record is None:
+                    self.logger.warning(f"Record {record_id} not found in database")
+                    return
 
-        if "iat" not in token_payload:
-            # Set issued at to current time
-            token_payload["iat"] = datetime.now(timezone.utc)
+                # if record is None:
+                #     self.logger.warning(f"Record {record_id} not found in database")
+                #     self.logger.warning(f"Triggering next queued duplicate for record {record_id}")
+                #     if md5_checksum and size_in_bytes:
+                #         await self._trigger_next_queued_duplicate(md5_checksum, size_in_bytes, None)
+                #     else:
+                #         self.logger.warning(f"Missing md5Checksum or sizeInBytes, skipping next queued duplicate")
+                #     return
 
-        # Generate the JWT token using jose
-        token = jwt.encode(token_payload, scoped_jwt_secret, algorithm="HS256")
-
-        return token
-
-    async def __create_scheduler(self, scheduler_type: str, logger: Logger, config_service: ConfigurationService) -> Scheduler:
-        """Create a Redis scheduler instance"""
-        redis_config = await config_service.get_config(config_node_constants.REDIS.value)
-        if not redis_config or not isinstance(redis_config, dict):
-            raise ValueError("Redis configuration not found")
-        redis_url = f"redis://{redis_config['host']}:{redis_config['port']}/{redis_config.get('db', 0)}"
-        return SchedulerFactory.scheduler(scheduler_type, redis_url, logger, config_service, delay_hours=1)
+                indexing_status = record.get("indexingStatus")
+                virtual_record_id = record.get("virtualRecordId")
+                if indexing_status == ProgressStatus.COMPLETED.value or indexing_status == ProgressStatus.EMPTY.value:
+                    await self.event_processor.arango_service.update_queued_duplicates_status(record_id, indexing_status, virtual_record_id)
+                elif indexing_status == ProgressStatus.ENABLE_MULTIMODAL_MODELS.value:
+                    # Find and trigger indexing for the next queued duplicate
+                    self.logger.info(f"🔄 Current record {record_id} has status {indexing_status}, triggering next queued duplicate")
+                    await self._trigger_next_queued_duplicate(record_id,virtual_record_id)
 
     async def __update_document_status(
         self,
@@ -378,7 +418,7 @@ class RecordEventHandler(BaseEventService):
         indexing_status: str,
         extraction_status: str,
         reason: Optional[str] = None,
-    ) -> None:
+    ) -> dict|None:
         """Update document status in Arango"""
         try:
             record = await self.event_processor.arango_service.get_document(
@@ -386,7 +426,7 @@ class RecordEventHandler(BaseEventService):
             )
             if not record:
                 self.logger.error(f"❌ Record {record_id} not found for status update")
-                return
+                return None
 
             doc = dict(record)
             if doc.get("extractionStatus") == ProgressStatus.COMPLETED.value:
@@ -406,9 +446,10 @@ class RecordEventHandler(BaseEventService):
                 docs, CollectionNames.RECORDS.value
             )
             self.logger.info(f"✅ Updated document status for record {record_id}")
-
+            return record
         except Exception as e:
             self.logger.error(f"❌ Failed to update document status: {str(e)}")
+            return None
 
     async def clean_event_handler(self) -> None:
         """Clean up the event handler"""

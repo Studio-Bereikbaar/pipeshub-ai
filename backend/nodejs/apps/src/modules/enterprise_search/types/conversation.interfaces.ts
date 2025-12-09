@@ -73,6 +73,7 @@ export interface IMessage {
   metadata?: IMessageMetadata;
   createdAt?: Date;
   updatedAt?: Date;
+  modelInfo?: IAIModel;
 }
 
 export interface IConversation {
@@ -107,6 +108,19 @@ export interface IConversation {
   updatedAt?: Date;
   failReason?: String;
   status?: String;
+  // Model information used for this conversation
+  modelInfo?: IAIModel;
+  // Errors array to track errors during conversation
+  conversationErrors?: Array<{
+    message: string;
+    errorType?: string;
+    timestamp?: Date;
+    messageId?: Types.ObjectId;
+    stack?: string;
+    metadata?: Map<string, any>;
+  }>;
+  // Additional metadata for useful information
+  metadata?: Map<string, any>;
 }
 
 export interface IAgentConversation extends IConversation {
@@ -148,4 +162,12 @@ export interface IAIResponse {
     aiTransactionId?: string;
     reason?: string;
   };
+  modelInfo?: IAIModel;
+}
+
+export interface IAIModel {
+  modelKey: string;
+  modelName: string;
+  modelProvider: string;
+  chatMode: string;
 }

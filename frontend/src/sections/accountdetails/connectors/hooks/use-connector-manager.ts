@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { Connector, ConnectorConfig } from '../types/types';
 import { ConnectorApiService } from '../services/api';
+import { CrawlingManagerApi } from '../services/crawling-manager';
+import { buildCronFromSchedule } from '../utils/cron';
 
 interface UseConnectorManagerReturn {
   // State
@@ -47,49 +49,54 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
   const [isEnablingWithFilters, setIsEnablingWithFilters] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
 
+  // Track fetch state to prevent duplicate calls
+  const fetchInProgressRef = useRef(false);
+  const lastFetchedConnectorRef = useRef<string | null>(null);
+
   // Simplified helper function to check authentication status
   const isConnectorAuthenticated = useCallback((connectorParam: Connector, config: any): boolean => {
     const authType = (connectorParam.authType || '').toUpperCase();
     
     if (authType === 'OAUTH') {
-      const creds = config?.config?.credentials;
-      return !!(creds && creds.access_token);
+      const authFlag = config?.isAuthenticated || false;
+      return authFlag ;
     }
-    if (authType === 'OAUTH_ADMIN_CONSENT') {
-      const authConfig = config?.config?.auth;
-      const hasAdminEmail = authConfig?.adminEmail;
-      const hasServiceAccountCredentials = authConfig?.client_id && authConfig?.project_id && authConfig?.type === 'service_account';
-      return !!(hasAdminEmail && hasServiceAccountCredentials);
-    }
+
     return !!connectorParam.isConfigured;
   }, []);
 
   // Fetch connector data
-  const fetchConnectorData = useCallback(async () => {
+  const fetchConnectorData = useCallback(async (forceRefresh = false) => {
     if (!connectorName) {
       return;
     }
+
+    // Prevent duplicate concurrent calls for the same connector (unless forced)
+    if (!forceRefresh) {
+      if (fetchInProgressRef.current && lastFetchedConnectorRef.current === connectorName) {
+        return;
+      }
+      // Skip if we just fetched this connector (prevents React StrictMode double calls)
+      // This check is only for automatic calls, not manual refreshes
+      if (lastFetchedConnectorRef.current === connectorName && !fetchInProgressRef.current) {
+        return;
+      }
+    }
+
+    fetchInProgressRef.current = true;
+    lastFetchedConnectorRef.current = connectorName;
 
     try {
       setLoading(true);
       setError(null);
 
-      // Fetch connector info
-      const connectors = await ConnectorApiService.getConnectors();
-      const foundConnector = connectors.find(
-        (c) => c.name.toLowerCase() === connectorName.toLowerCase()
-      );
-
-      if (!foundConnector) {
-        setError(`Connector "${connectorName}" not found`);
-        return;
-      }
-
+      // Fetch specific connector info (optimized - only fetches the connector we need)
+      const foundConnector = await ConnectorApiService.getConnectorByName(connectorName);
       setConnector(foundConnector);
 
       // Fetch connector configuration
       try {
-        const config = await ConnectorApiService.getConnectorConfig(connectorName.toUpperCase());
+        const config = await ConnectorApiService.getConnectorConfig(connectorName);
         setConnectorConfig(config);
 
         // Use simplified authentication check
@@ -98,11 +105,12 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
         console.warn('Could not fetch connector config:', configError);
         // Continue without config - connector might not be configured yet
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error fetching connector data:', err);
-      setError('Failed to load connector information');
+      setError(err.message || 'Failed to load connector information');
     } finally {
       setLoading(false);
+      fetchInProgressRef.current = false;
     }
   }, [connectorName, isConnectorAuthenticated]);
 
@@ -126,6 +134,13 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
     //     }
     //   }
 
+      // Capture pre-toggle state
+      const wasActive = !!connector.isActive;
+      const selectedStrategy = String(
+        connectorConfig?.config?.sync?.selectedStrategy || ''
+      ).toUpperCase();
+      const scheduledCfg = (connectorConfig?.config?.sync?.scheduledConfig || {}) as any;
+
       // Proceed with toggle
       const successResponse = await ConnectorApiService.toggleConnector(connector.name);
 
@@ -139,11 +154,47 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
 
         // Clear success message after 4 seconds
         setTimeout(() => setSuccess(false), 4000);
+
+        // Scheduling behavior tied to enabling/active transitions
+        try {
+          if (enabled && !wasActive) {
+            // First-time enable (or enabling from inactive): if strategy is SCHEDULED, schedule now
+            const hasRequiredSchedule =
+              scheduledCfg && (scheduledCfg.intervalMinutes || scheduledCfg.cronExpression);
+            if (selectedStrategy === 'SCHEDULED' && hasRequiredSchedule) {
+              const cron = buildCronFromSchedule({
+                startTime: scheduledCfg.startTime,
+                intervalMinutes: scheduledCfg.intervalMinutes,
+                timezone: (scheduledCfg.timezone || 'UTC').toUpperCase(),
+              });
+              await CrawlingManagerApi.schedule(connector.name.toLowerCase(), {
+                scheduleConfig: {
+                  scheduleType: 'custom',
+                  isEnabled: true,
+                  timezone: (scheduledCfg.timezone || 'UTC').toUpperCase(),
+                  cronExpression: cron,
+                },
+                priority: 5,
+                maxRetries: 3,
+                timeout: 300000,
+              });
+            }
+          } else if (!enabled && wasActive) {
+            // Disabling: remove any existing schedule
+            try {
+              await CrawlingManagerApi.remove(connector.name.toLowerCase());
+            } catch (removeError) {
+              console.error('Failed to remove schedule on disable:', removeError);
+            }
+          }
+        } catch (scheduleError) {
+          console.error('Scheduling operation failed:', scheduleError);
+        }
       } else {
         setError(`Failed to ${enabled ? 'enable' : 'disable'} connector`);
       }
     },
-    [connector]
+    [connector, connectorConfig]
   );
 
   // Handle configuration dialog
@@ -155,21 +206,49 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
     setConfigDialogOpen(false);
   }, []);
 
-  const handleConfigSuccess = useCallback(() => {
+  const handleConfigSuccess = useCallback(async () => {
     setConfigDialogOpen(false);
     setSuccessMessage(`${connector?.name} configured successfully`);
     setSuccess(true);
 
-    // Refresh connector data
-    fetchConnectorData();
+    // Update connector state without full refresh - only fetch updated config
+    if (connector) {
+      try {
+        // Fetch updated connector config (lightweight)
+        const updatedConfig = await ConnectorApiService.getConnectorConfig(connector.name);
+        setConnectorConfig(updatedConfig);
+        
+        // Update connector's isConfigured status
+        setConnector((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            isConfigured: true,
+          };
+        });
+
+        // Update authentication status based on config
+        setIsAuthenticated(isConnectorAuthenticated(connector, updatedConfig));
+      } catch (configError) {
+        console.warn('Could not refresh connector config after save:', configError);
+        // Still show success even if refresh fails - just update the configured status
+        setConnector((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            isConfigured: true,
+          };
+        });
+      }
+    }
 
     // Clear success message after 4 seconds
     setTimeout(() => setSuccess(false), 4000);
-  }, [connector, fetchConnectorData]);
+  }, [connector, isConnectorAuthenticated]);
 
-  // Handle refresh
+  // Handle refresh - force refresh to bypass duplicate call guards
   const handleRefresh = useCallback(() => {
-    fetchConnectorData();
+    fetchConnectorData(true);
   }, [fetchConnectorData]);
 
   // Handle authentication (only for OAuth)
@@ -195,7 +274,7 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
           if (event.data.type === 'OAUTH_SUCCESS' && event.data.connector === connector.name) {
             try {
               // OAuth completed successfully
-              const refreshed = await ConnectorApiService.getConnectorConfig(connector.name.toUpperCase());
+              const refreshed = await ConnectorApiService.getConnectorConfig(connector.name);
               setConnectorConfig(refreshed);
               setIsAuthenticated(true);
               
@@ -301,8 +380,13 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
 
   // Initialize
   useEffect(() => {
+    // Reset fetch flag when connector name changes
+    if (lastFetchedConnectorRef.current !== connectorName) {
+      fetchInProgressRef.current = false;
+      lastFetchedConnectorRef.current = null;
+    }
     fetchConnectorData();
-  }, [fetchConnectorData]);
+  }, [fetchConnectorData, connectorName]);
 
   // Handle OAuth success/error from URL parameters
   useEffect(() => {
@@ -322,7 +406,7 @@ export const useConnectorManager = (): UseConnectorManagerReturn => {
       // OAuth was successful, refresh the connector data and show filter dialog
       const handleOAuthSuccess = async () => {
         try {
-          const refreshed = await ConnectorApiService.getConnectorConfig(urlConnectorName.toUpperCase());
+          const refreshed = await ConnectorApiService.getConnectorConfig(urlConnectorName);
           setConnectorConfig(refreshed);
           setIsAuthenticated(true);
           

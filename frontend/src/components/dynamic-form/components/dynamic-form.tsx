@@ -64,6 +64,7 @@ export interface DynamicFormRef {
   getFormData: () => Promise<any>;
   validateForm: () => Promise<boolean>;
   hasFormData: () => Promise<boolean>;
+  rehydrateForm?: (data: any) => Promise<void>;
 
   // Legacy method names for backward compatibility
   handleSubmit?: () => Promise<SaveResult>; // Alias for handleSave
@@ -338,8 +339,9 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
 
               resolve({ success: true });
             } catch (error: any) {
+              console.error('Error saving configuration:', error);
               const errorMessage =
-                error.response?.data?.message ||
+                error.response?.data?.message || error.message ||
                 `Failed to save ${providerConfig?.label} configuration`;
               setSaveError(errorMessage);
               resolve({ success: false, error: errorMessage });
@@ -364,11 +366,19 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
       getFormData: async (): Promise<any> => {
         const formData = getValues();
         const isLegacyModelType = ['llm', 'embedding'].includes(finalConfigType);
-        return {
+        
+        const result = {
           ...formData,
           [isLegacyModelType ? 'modelType' : 'providerType']: currentProvider,
           _provider: currentProvider,
         };
+        
+        // Handle "other" provider case for Bedrock: use customProvider value
+        if (currentProvider === 'bedrock' && formData.provider === 'other' && formData.customProvider) {
+          result.provider = formData.customProvider;
+        }
+        
+        return result;
       },
 
       validateForm: async (): Promise<boolean> => {
@@ -422,6 +432,17 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
         });
       },
 
+      // Allow parent to rehydrate form with previously captured data (including provider)
+      rehydrateForm: async (data: any): Promise<void> => {
+        if (!data) return;
+        const providerType = data.providerType || (data as any).modelType || currentProvider;
+        if (providerType && resetToProvider) {
+          resetToProvider(providerType, data);
+        } else if (reset) {
+          reset(data);
+        }
+      },
+
       handleSubmit: handleSaveImpl,
     };
   }, [
@@ -436,6 +457,8 @@ const DynamicForm = forwardRef<DynamicFormRef, DynamicFormProps>((props, ref) =>
     updateConfig,
     onSaveSuccess,
     fetchConfig,
+    resetToProvider,
+    reset,
   ]);
 
   // Add legacy method alias

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import aiohttp
 
+from app.config.configuration_service import ConfigurationService
 from app.config.constants.arangodb import (
     CollectionNames,
     EventTypes,
@@ -15,15 +16,19 @@ from app.config.constants.arangodb import (
     RecordTypes,
 )
 from app.config.constants.http_status_code import HttpStatusCode
+from app.utils.jwt import generate_jwt
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
 
 class EventProcessor:
-    def __init__(self, logger, processor, arango_service) -> None:
+    def __init__(self, logger, processor, arango_service, config_service: ConfigurationService = None) -> None:
         self.logger = logger
         self.logger.info("🚀 Initializing EventProcessor")
         self.processor = processor
         self.arango_service = arango_service
+        self.config_service = config_service
+
+
 
     async def _download_from_signed_url(
         self, signed_url: str, record_id: str, doc: dict
@@ -49,13 +54,29 @@ class EventProcessor:
             sock_read=1200,  # 20 minutes per chunk read
         )
 
+        # Generate JWT token for authentication if config_service is available
+        headers = {}
+        if self.config_service:
+            try:
+                org_id = doc.get("orgId")
+                if org_id:
+                    jwt_payload = {
+                        "orgId": org_id,
+                        "scopes": ["connector:signedUrl"],
+                    }
+                    jwt_token = await generate_jwt(self.config_service, jwt_payload)
+                    headers["Authorization"] = f"Bearer {jwt_token}"
+                    self.logger.debug(f"Generated JWT token for downloading signed URL for record {record_id}")
+            except Exception as e:
+                self.logger.warning(f"Failed to generate JWT token for signed URL download: {e}")
+
         for attempt in range(max_retries):
             delay = base_delay * (2**attempt)  # Exponential backoff
             file_buffer = BytesIO()
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     try:
-                        async with session.get(signed_url) as response:
+                        async with session.get(signed_url, headers=headers) as response:
                             if response.status != HttpStatusCode.SUCCESS.value:
                                 raise aiohttp.ClientError(
                                     f"Failed to download file: {response.status}"
@@ -154,30 +175,30 @@ class EventProcessor:
             record_id = event_data.get("recordId")
             org_id = event_data.get("orgId")
             virtual_record_id = event_data.get("virtualRecordId")
-            self.logger.info(f"📥 Processing event: {event_type}: {record_id}")
+            self.logger.info(f"📥 Processing event: {event_type}: for record {record_id} with virtual_record_id {virtual_record_id}")
 
             if not record_id:
                 self.logger.error("❌ No record ID provided in event data")
                 return
 
-            # For both create and update events, we need to process the document
-            if event_type == EventTypes.REINDEX_RECORD.value or event_type == EventTypes.UPDATE_RECORD.value:
-                # For updates, first delete existing embeddings
-                self.logger.info(
-                    f"""🔄 Updating record {record_id} - deleting existing embeddings"""
-                )
-                await self.processor.indexing_pipeline.delete_embeddings(record_id, virtual_record_id)
-
-            if virtual_record_id is None:
-                virtual_record_id = str(uuid4())
-
-            # Update indexing status to IN_PROGRESS
             record = await self.arango_service.get_document(
                 record_id, CollectionNames.RECORDS.value
             )
-            if record is None:
-                self.logger.error(f"❌ Record {record_id} not found in database")
-                return
+
+            if virtual_record_id is None:
+                virtual_record_id = record.get("virtualRecordId")
+
+            # For both create and update events, we need to process the document
+            if event_type == EventTypes.REINDEX_RECORD.value or event_type == EventTypes.UPDATE_RECORD.value:
+                # For updates, first delete existing embeddings
+
+                self.logger.info(
+                    f"""🔄 Deleting existing embeddings for record {record_id} for event {event_type}"""
+                )
+                await self.processor.indexing_pipeline.delete_embeddings(record_id, virtual_record_id)
+
+            # Update indexing status to IN_PROGRESS
+
             doc = dict(record)
 
             # Extract necessary data
@@ -187,13 +208,11 @@ class EventProcessor:
             extension = event_data.get("extension", "unknown")
             mime_type = event_data.get("mimeType", "unknown")
             origin = event_data.get("origin", "CONNECTOR" if connector != "" else "UPLOAD")
-            record_type = event_data.get("recordType", "unknown")
             record_name = event_data.get("recordName", f"Untitled-{record_id}")
 
-            if extension is None and mime_type != "text/gmail_content":
-                extension = event_data["recordName"].split(".")[-1]
-
             if mime_type == "text/gmail_content":
+                if virtual_record_id is None:
+                    virtual_record_id = str(uuid4())
                 self.logger.info("🚀 Processing Gmail Message")
                 result = await self.processor.process_gmail_message(
                     recordName=record_name,
@@ -235,11 +254,13 @@ class EventProcessor:
 
                     # Add indexingStatus to initial duplicate check to find in-progress files
                     duplicate_files = await self.arango_service.find_duplicate_files(file_doc.get('_key'), md5_checksum, size_in_bytes)
+
+                    duplicate_files = [f for f in duplicate_files if f is not None]
                     if duplicate_files:
                         # Wait and check for processed duplicates
-                        for attempt in range(60):  # Wait up to 60 seconds
+                        for attempt in range(60):
                             processed_duplicate = next(
-                                (f for f in duplicate_files if f.get("summaryDocumentId") and f.get("virtualRecordId")),
+                                (f for f in duplicate_files if (f.get("virtualRecordId") and f.get("indexingStatus") == ProgressStatus.COMPLETED.value) or (f.get("indexingStatus") == ProgressStatus.EMPTY.value)),
                                 None
                             )
 
@@ -249,9 +270,9 @@ class EventProcessor:
                                     "isDirty": False,
                                     "summaryDocumentId": processed_duplicate.get("summaryDocumentId"),
                                     "virtualRecordId": processed_duplicate.get("virtualRecordId"),
-                                    "indexingStatus": ProgressStatus.COMPLETED.value,
+                                    "indexingStatus": processed_duplicate.get("indexingStatus"),
                                     "lastIndexTimestamp": get_epoch_timestamp_in_ms(),
-                                    "extractionStatus": ProgressStatus.COMPLETED.value,
+                                    "extractionStatus": processed_duplicate.get("extractionStatus"),
                                     "lastExtractionTimestamp": get_epoch_timestamp_in_ms(),
                                 })
                                 await self.arango_service.batch_upsert_nodes([doc], CollectionNames.RECORDS.value)
@@ -269,15 +290,16 @@ class EventProcessor:
                                 None
                             )
 
+                            # TODO: handle race condition here
                             if in_progress:
-                                self.logger.info(f"🚀 Duplicate file {in_progress.get('_key')} is being processed, waiting...")
+                                self.logger.info(f"🚀 Duplicate file {in_progress.get('_key')} is being processed, changing status to QUEUED.")
                                 self.logger.info(f"Retried {attempt} times")
-                                # TODO: Remove this sleep
-                                await asyncio.sleep(5)
-                                # Refresh duplicate files list
-                                duplicate_files = await self.arango_service.find_duplicate_files(
-                                    file_doc.get('_key'), md5_checksum, size_in_bytes
-                                )
+
+                                doc.update({
+                                    "indexingStatus": ProgressStatus.QUEUED.value,
+                                })
+                                await self.arango_service.batch_upsert_nodes([doc], CollectionNames.RECORDS.value)
+                                return
                             else:
                                 # No file is being processed, we can proceed
                                 break
@@ -285,9 +307,14 @@ class EventProcessor:
                         self.logger.info(f"🚀 No processed duplicate found, proceeding with processing for {record_id}")
                     else:
                         self.logger.info(f"🚀 No duplicate files found for record {record_id}")
+                        if event_type == EventTypes.UPDATE_RECORD.value:
+                            virtual_record_id = str(uuid4())
                 except Exception as e:
                     self.logger.error(f"❌ Error in file processing: {repr(e)}")
                     raise
+
+            if virtual_record_id is None:
+                virtual_record_id = str(uuid4())
 
             if mime_type == MimeTypes.GOOGLE_SLIDES.value:
                 self.logger.info("🚀 Processing Google Slides")
@@ -344,10 +371,8 @@ class EventProcessor:
                     version=record_version,
                     source=connector,
                     orgId=org_id,
-                    html_content=file_content,
+                    html_binary=file_content,
                     virtual_record_id = virtual_record_id,
-                    origin = origin,
-                    recordType = record_type
                 )
                 return result
 
@@ -366,7 +391,7 @@ class EventProcessor:
                 )
                 return result
 
-            if extension == ExtensionTypes.PDF.value:
+            if extension == ExtensionTypes.PDF.value or mime_type == MimeTypes.PDF.value:
                 result = await self.processor.process_pdf_with_docling(
                     recordName=record_name,
                     recordId=record_id,
@@ -384,18 +409,18 @@ class EventProcessor:
                         virtual_record_id = virtual_record_id
                     )
 
-            elif extension == ExtensionTypes.DOCX.value:
+            elif extension == ExtensionTypes.DOCX.value or mime_type == MimeTypes.DOCX.value:
                 result = await self.processor.process_docx_document(
                     recordName=record_name,
                     recordId=record_id,
                     version=record_version,
                     source=connector,
                     orgId=org_id,
-                    docx_binary=BytesIO(file_content),
+                    docx_binary=file_content,
                     virtual_record_id = virtual_record_id
                 )
 
-            elif extension == ExtensionTypes.DOC.value:
+            elif extension == ExtensionTypes.DOC.value or mime_type == MimeTypes.DOC.value:
                 result = await self.processor.process_doc_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -405,7 +430,7 @@ class EventProcessor:
                     doc_binary=file_content,
                     virtual_record_id = virtual_record_id
                 )
-            elif extension == ExtensionTypes.XLSX.value:
+            elif extension == ExtensionTypes.XLSX.value or mime_type == MimeTypes.XLSX.value:
                 result = await self.processor.process_excel_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -415,7 +440,7 @@ class EventProcessor:
                     excel_binary=file_content,
                     virtual_record_id = virtual_record_id
                 )
-            elif extension == ExtensionTypes.XLS.value:
+            elif extension == ExtensionTypes.XLS.value or mime_type == MimeTypes.XLS.value:
                 result = await self.processor.process_xls_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -425,7 +450,7 @@ class EventProcessor:
                     xls_binary=file_content,
                     virtual_record_id = virtual_record_id
                 )
-            elif extension == ExtensionTypes.CSV.value:
+            elif extension == ExtensionTypes.CSV.value or mime_type == MimeTypes.CSV.value:
                 result = await self.processor.process_csv_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -437,20 +462,18 @@ class EventProcessor:
                     origin=origin,
                 )
 
-            elif extension == ExtensionTypes.HTML.value:
+            elif extension == ExtensionTypes.HTML.value or mime_type == MimeTypes.HTML.value:
                 result = await self.processor.process_html_document(
                     recordName=record_name,
                     recordId=record_id,
                     version=record_version,
                     source=connector,
                     orgId=org_id,
-                    html_content=file_content,
+                    html_binary=file_content,
                     virtual_record_id = virtual_record_id,
-                    origin=connector,
-                    recordType=record_type
                 )
 
-            elif extension == ExtensionTypes.PPTX.value:
+            elif extension == ExtensionTypes.PPTX.value or mime_type == MimeTypes.PPTX.value:
                 result = await self.processor.process_pptx_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -461,7 +484,7 @@ class EventProcessor:
                     virtual_record_id = virtual_record_id
                 )
 
-            elif extension == ExtensionTypes.PPT.value:
+            elif extension == ExtensionTypes.PPT.value or mime_type == MimeTypes.PPT.value:
                 result = await self.processor.process_ppt_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -472,7 +495,7 @@ class EventProcessor:
                     virtual_record_id = virtual_record_id
                 )
 
-            elif extension == ExtensionTypes.MD.value:
+            elif extension == ExtensionTypes.MD.value or mime_type == MimeTypes.MARKDOWN.value:
                 result = await self.processor.process_md_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -483,7 +506,7 @@ class EventProcessor:
                     virtual_record_id = virtual_record_id
                 )
 
-            elif extension == ExtensionTypes.MDX.value:
+            elif extension == ExtensionTypes.MDX.value or mime_type == MimeTypes.MDX.value:
                 result = await self.processor.process_mdx_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -494,7 +517,7 @@ class EventProcessor:
                     virtual_record_id = virtual_record_id
                 )
 
-            elif extension == ExtensionTypes.TXT.value:
+            elif extension == ExtensionTypes.TXT.value or mime_type == MimeTypes.PLAIN_TEXT.value:
                 result = await self.processor.process_txt_document(
                     recordName=record_name,
                     recordId=record_id,
@@ -506,6 +529,27 @@ class EventProcessor:
                     recordType=record_type,
                     connectorName=connector,
                     origin=origin
+                )
+
+            elif (
+                 extension in {
+                    ExtensionTypes.PNG.value,
+                    ExtensionTypes.JPG.value,
+                    ExtensionTypes.JPEG.value,
+                    ExtensionTypes.WEBP.value,
+                }
+                or mime_type in {
+                    MimeTypes.PNG.value,
+                    MimeTypes.JPG.value,
+                    MimeTypes.JPEG.value,
+                    MimeTypes.WEBP.value,
+                }
+            ):
+                # Route image files to the image processor
+                result = await self.processor.process_image(
+                    record_id,
+                    file_content,
+                    virtual_record_id,
                 )
 
             else:
@@ -520,3 +564,4 @@ class EventProcessor:
             # Let the error bubble up to Kafka consumer
             self.logger.error(f"❌ Error in event processor: {repr(e)}")
             raise
+

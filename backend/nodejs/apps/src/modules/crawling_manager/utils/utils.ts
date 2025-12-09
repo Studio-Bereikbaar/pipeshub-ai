@@ -1,5 +1,5 @@
 import {
-  EventType, Event,
+  Event,
   ReindexAllRecordEvent,
 } from '../../knowledge_base/services/sync_events.service';
 
@@ -7,13 +7,8 @@ export const constructSyncConnectorEvent = (
   orgId: string,
   connector: string,
 ) : Event => {
-  const eventTypeMap: Record<string, EventType> = {
-    'drive': EventType.SyncDriveEvent,
-    'gmail': EventType.SyncGmailEvent,
-    'onedrive': EventType.SyncOneDriveEvent,
-  };
 
-  const eventType = eventTypeMap[connector] || EventType.ReindexAllRecordEvent;
+  const eventType = connector.replace(' ', '').toLowerCase() + '.resync';
 
   const payload = {
     orgId: orgId,
@@ -25,7 +20,7 @@ export const constructSyncConnectorEvent = (
   } as ReindexAllRecordEvent;
 
   const event : Event = {
-    eventType: eventType,
+    eventType: eventType ,
     timestamp: Date.now(),
     payload: payload,
   };

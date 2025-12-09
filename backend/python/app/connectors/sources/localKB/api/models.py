@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.config.constants.arangodb import ProgressStatus
+
 
 class PermissionRole(str, Enum):
     """Valid permission roles for knowledge base access"""
@@ -21,21 +23,12 @@ class RecordType(str, Enum):
     FILE = "FILE"
     DRIVE = "DRIVE"
     WEBPAGE = "WEBPAGE"
+    COMMENT = "COMMENT"
     MESSAGE = "MESSAGE"
     MAIL = "MAIL"
     OTHERS = "OTHERS"
 
 
-class IndexingStatus(str, Enum):
-    """Valid indexing status values"""
-    NOT_STARTED = "NOT_STARTED"
-    IN_PROGRESS = "IN_PROGRESS"
-    PAUSED = "PAUSED"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    FILE_TYPE_NOT_SUPPORTED = "FILE_TYPE_NOT_SUPPORTED"
-    MANUAL_SYNC = "MANUAL_SYNC"
-    AUTO_INDEX_OFF = "AUTO_INDEX_OFF"
 
 
 class SortOrder(str, Enum):
@@ -54,8 +47,6 @@ class SourceType(str, Enum):
 # Request Models
 class CreateKnowledgeBaseRequest(BaseModel):
     """Request model for creating a knowledge base"""
-    userId: str = Field(..., description ="User id", min_length=1)
-    orgId: str = Field(..., description ="Org id", min_length=1)
     name: str = Field(..., description="Name of the knowledge base", min_length=1, max_length=255)
 
 
@@ -137,7 +128,7 @@ class FolderResponse(BaseModel):
 
 class PermissionContents(BaseModel):
     """Response model for permission information"""
-    role: PermissionRole = Field(..., description="Permission role")
+    role: Optional[PermissionRole] = Field(None, description="Permission role (None for team permissions)")
     type: str = Field(..., description="Permission type")
 
 
@@ -150,7 +141,7 @@ class RecordResponse(BaseModel):
     recordType: RecordType = Field(..., description="Record type")
     origin: str = Field(..., description="Origin")
     connectorName: Optional[str] = Field(..., description="Connector name")
-    indexingStatus: IndexingStatus = Field(..., description="Indexing status")
+    indexingStatus: ProgressStatus = Field(..., description="Indexing status")
     createdAtTimestamp: int = Field(..., description="Creation timestamp")
     updatedAtTimestamp: int = Field(..., description="Update timestamp")
     sourceCreatedAtTimestamp: Optional[int] = Field(None, description="Source creation timestamp")
@@ -204,7 +195,7 @@ class PermissionResponse(BaseModel):
     userId: Optional[str] = Field(None, description="User ID")
     email: Optional[str] = Field(None, description="User email")
     name: Optional[str] = Field(None, description="User name")
-    role: PermissionRole = Field(..., description="Permission role")
+    role: Optional[PermissionRole] = Field(None, description="Permission role (None for team permissions)")
     type: str = Field(..., description="Permission type")
     createdAtTimestamp: int = Field(..., description="Creation timestamp")
     updatedAtTimestamp: int = Field(..., description="Update timestamp")

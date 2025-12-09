@@ -17,6 +17,8 @@ export const modelService = {
           isActive: model.isActive || false,
           isDefault: model.isDefault || false,
           isMultimodal: model.isMultimodal || false,
+          isReasoning: model.isReasoning || false,
+          contextLength: model.contextLength,
         }));
       }
       return [];
@@ -34,7 +36,9 @@ export const modelService = {
         provider: modelData.provider,
         configuration: modelData.configuration,
         isMultimodal: modelData.isMultimodal || false,
+        isReasoning: modelData.isReasoning || false,
         isDefault: modelData.isDefault || false,
+        contextLength: modelData.contextLength,
       };
 
       const response = await axios.post(
@@ -62,6 +66,8 @@ export const modelService = {
         configuration: modelData.configuration,
         isMultimodal: modelData.isMultimodal || false,
         isDefault: modelData.isDefault || false,
+        isReasoning: modelData.isReasoning || false,
+        contextLength: modelData.contextLength,
       };
 
       const response = await axios.put(
@@ -124,6 +130,9 @@ export const modelService = {
         ...activeModel.configuration,
         providerType: activeModel.provider,
         modelType: activeModel.provider,
+        isMultimodal: activeModel.isMultimodal,
+        isReasoning: activeModel.isReasoning,
+        contextLength: activeModel.contextLength,
       };
     }
     return null;
@@ -137,6 +146,7 @@ export const modelService = {
         ...activeModel.configuration,
         providerType: activeModel.provider,
         modelType: activeModel.provider,
+        isMultimodal: activeModel.isMultimodal,
       };
     }
     // Default embedding fallback
@@ -147,8 +157,16 @@ export const modelService = {
   },
 
   async updateLlmConfig(config: any): Promise<any> {
-    const { modelType, providerType, _provider, ...cleanConfig } = config;
+    const { modelType, providerType, _provider, isMultimodal, isReasoning, ...cleanConfig } = config;
+    console.log("isMultimodal", isMultimodal);
+    console.log("cleanConfig", cleanConfig);
     const provider = providerType || modelType || _provider;
+    
+    // Handle "other" provider case for Bedrock: use customProvider value
+    if (provider === 'bedrock' && cleanConfig.provider === 'other' && cleanConfig.customProvider) {
+      cleanConfig.provider = cleanConfig.customProvider;
+      delete cleanConfig.customProvider;
+    }
 
     // Update or create model
     const models = await this.getAllModels('llm');
@@ -159,18 +177,30 @@ export const modelService = {
         provider,
         configuration: cleanConfig,
         isDefault: true,
+        isMultimodal: Boolean(isMultimodal),
+        isReasoning: Boolean(isReasoning),
+        contextLength: cleanConfig.contextLength,
       });
     }
     return this.addModel('llm', {
       provider,
       configuration: cleanConfig,
       isDefault: true,
+      isMultimodal: Boolean(isMultimodal),
+      isReasoning: Boolean(isReasoning),
+      contextLength: cleanConfig.contextLength,
     });
   },
 
   async updateEmbeddingConfig(config: any): Promise<any> {
-    const { modelType, providerType, _provider, ...cleanConfig } = config;
+    const { modelType, providerType, _provider, isMultimodal, ...cleanConfig } = config;
     const provider = providerType || modelType || _provider;
+    
+    // Handle "other" provider case for Bedrock: use customProvider value
+    if (provider === 'bedrock' && cleanConfig.provider === 'other' && cleanConfig.customProvider) {
+      cleanConfig.provider = cleanConfig.customProvider;
+      delete cleanConfig.customProvider;
+    }
 
     if (provider === 'default') {
       // Handle default embedding case - just return success
@@ -185,12 +215,14 @@ export const modelService = {
         provider,
         configuration: cleanConfig,
         isDefault: true,
+        isMultimodal: Boolean(isMultimodal),
       });
     }
     return this.addModel('embedding', {
       provider,
       configuration: cleanConfig,
       isDefault: true,
+      isMultimodal: Boolean(isMultimodal),
     });
   },
 };

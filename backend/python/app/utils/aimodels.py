@@ -11,6 +11,7 @@ from app.config.constants.ai_models import (
     DEFAULT_EMBEDDING_MODEL,
     AzureOpenAILLM,
 )
+from app.utils.logger import create_logger
 
 
 class ModelType(str, Enum):
@@ -24,6 +25,7 @@ class ModelType(str, Enum):
 class EmbeddingProvider(Enum):
     ANTHROPIC = "anthropic"
     AWS_BEDROCK = "bedrock"
+    AZURE_AI = "azureAI"
     AZURE_OPENAI = "azureOpenAI"
     COHERE = "cohere"
     DEFAULT = "default"
@@ -43,6 +45,7 @@ class EmbeddingProvider(Enum):
 class LLMProvider(Enum):
     ANTHROPIC = "anthropic"
     AWS_BEDROCK = "bedrock"
+    AZURE_AI = "azureAI"
     AZURE_OPENAI = "azureOpenAI"
     COHERE = "cohere"
     FIREWORKS = "fireworks"
@@ -56,6 +59,8 @@ class LLMProvider(Enum):
     VERTEX_AI = "vertexAI"
     XAI = "xai"
 
+MAX_OUTPUT_TOKENS = 16000
+MAX_OUTPUT_TOKENS_CLAUDE_4_5 = 64000
 
 def get_default_embedding_model() -> Embeddings:
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -71,6 +76,7 @@ def get_default_embedding_model() -> Embeddings:
     except Exception  as e:
         raise e
 
+logger = create_logger("aimodels")
 def get_embedding_model(provider: str, config: Dict[str, Any], model_name: str | None = None) -> Embeddings:
     configuration = config['configuration']
     is_default = config.get("isDefault")
@@ -85,7 +91,22 @@ def get_embedding_model(provider: str, config: Dict[str, Any], model_name: str |
         if model_name not in model_names:
             raise ValueError(f"Model name {model_name} not found in {configuration['model']}")
 
-    if provider == EmbeddingProvider.AZURE_OPENAI.value:
+    logger.info(f"Getting embedding model: provider={provider}, model_name={model_name}")
+
+    if provider == EmbeddingProvider.AZURE_AI.value:
+        from langchain_openai.embeddings import OpenAIEmbeddings
+        if "cohere" or "embed-v" in model_name.lower():
+            check_embedding_ctx_length = False
+        else:
+            check_embedding_ctx_length = True
+        return OpenAIEmbeddings(
+            model=model_name,
+            api_key=configuration['apiKey'],
+            base_url=configuration['endpoint'],
+            check_embedding_ctx_length=check_embedding_ctx_length,
+        )
+
+    elif provider == EmbeddingProvider.AZURE_OPENAI.value:
         from langchain_openai.embeddings import AzureOpenAIEmbeddings
 
         return AzureOpenAIEmbeddings(
@@ -148,9 +169,8 @@ def get_embedding_model(provider: str, config: Dict[str, Any], model_name: str |
 
     elif provider == EmbeddingProvider.JINA_AI.value:
         from langchain_community.embeddings.jina import JinaEmbeddings
-
         return JinaEmbeddings(
-            model=model_name,
+            model_name=model_name,
             jina_api_key=configuration['apiKey'],
         )
 
@@ -220,14 +240,20 @@ def get_embedding_model(provider: str, config: Dict[str, Any], model_name: str |
         )
 
     elif provider == EmbeddingProvider.VOYAGE.value:
-        from langchain_voyageai import VoyageAIEmbeddings
+        from app.utils.custom_embeddings import VoyageEmbeddings
 
-        return VoyageAIEmbeddings(
+        return VoyageEmbeddings(
             model=model_name,
-            api_key=configuration['apiKey'],
+            voyage_api_key=configuration['apiKey'],
         )
 
     raise ValueError(f"Unsupported embedding config type: {provider}")
+
+def _get_anthropic_max_tokens(model_name: str) -> int:
+    """Gets the max output tokens for an Anthropic model based on its name."""
+    if '4.5' in model_name:
+        return MAX_OUTPUT_TOKENS_CLAUDE_4_5
+    return MAX_OUTPUT_TOKENS
 
 def get_generator_model(provider: str, config: Dict[str, Any], model_name: str | None = None) -> BaseChatModel:
     configuration = config['configuration']
@@ -243,37 +269,121 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         if model_name not in model_names:
             raise ValueError(f"Model name {model_name} not found in {configuration['model']}")
 
+    DEFAULT_LLM_TIMEOUT = 360.0
     if provider == LLMProvider.ANTHROPIC.value:
         from langchain_anthropic import ChatAnthropic
 
+        max_tokens = _get_anthropic_max_tokens(model_name)
         return ChatAnthropic(
                 model=model_name,
                 temperature=0.2,
-                timeout=None,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 max_retries=2,
                 api_key=configuration["apiKey"],
+                max_tokens=max_tokens,
             )
+
     elif provider == LLMProvider.AWS_BEDROCK.value:
         from langchain_aws import ChatBedrock
 
+        # Determine the actual provider based on model name if not explicitly set
+        provider_in_bedrock = configuration.get("provider")
+
+        # Handle custom provider (when user selects "other")
+        if provider_in_bedrock == "other":
+            custom_provider = configuration.get("customProvider")
+            if custom_provider:
+                provider_in_bedrock = custom_provider
+                logger.info(f"Using custom provider: {provider_in_bedrock}")
+            else:
+                # Fall back to auto-detection if custom provider is not provided
+                provider_in_bedrock = None
+
+        # Auto-detect provider from model name if not explicitly set
+        if not provider_in_bedrock:
+            if "mistral" in model_name.lower():
+                provider_in_bedrock = LLMProvider.MISTRAL.value
+            elif "claude" in model_name.lower() or "anthropic" in model_name.lower():
+                provider_in_bedrock = LLMProvider.ANTHROPIC.value
+            elif "llama" in model_name.lower() or "meta" in model_name.lower():
+                provider_in_bedrock = "meta"
+            elif "titan" in model_name.lower() or "amazon" in model_name.lower():
+                provider_in_bedrock = "amazon"
+            elif "cohere" in model_name.lower():
+                provider_in_bedrock = "cohere"
+            elif "ai21" in model_name.lower() or "jamba" in model_name.lower():
+                provider_in_bedrock = "ai21"
+            elif "qwen" in model_name.lower():
+                provider_in_bedrock = "qwen"
+            else:
+                # Default to anthropic for backwards compatibility
+                provider_in_bedrock = LLMProvider.ANTHROPIC.value
+
+        logger.info(f"Provider in Bedrock: {provider_in_bedrock} for model: {model_name}")
+
+        # Set model_kwargs based on the provider
+        # For Anthropic models in Bedrock, we need to pass max_tokens in model_kwargs
+        # but NOT anthropic_version (which causes the validation error)
+        if provider_in_bedrock == LLMProvider.ANTHROPIC.value:
+            max_tokens = _get_anthropic_max_tokens(model_name)
+            model_kwargs = {
+                "max_tokens": max_tokens,
+            }
+        else:
+            model_kwargs = {}
+
+        # Create the ChatBedrock instance
+        # Note: Do NOT pass anthropic_version or any Anthropic-specific client parameters
+        # AWS Bedrock handles the underlying model interaction differently
         return ChatBedrock(
                 model_id=model_name,
                 temperature=0.2,
                 aws_access_key_id=configuration["awsAccessKeyId"],
                 aws_secret_access_key=configuration["awsAccessSecretKey"],
                 region_name=configuration["region"],
-                provider=configuration.get("provider", "anthropic"),
+                provider=provider_in_bedrock,
+                model_kwargs=model_kwargs,
+                # Explicitly disable any client-specific parameters that might be auto-added
+                beta_use_converse_api=True,  # Use the Converse API which is more standardized
             )
+    elif provider == LLMProvider.AZURE_AI.value:
+        from langchain_anthropic import ChatAnthropic
+        from langchain_openai import ChatOpenAI
+
+        is_reasoning_model = "gpt-5" in model_name or config.get("isReasoning", False)
+        temperature = 1 if is_reasoning_model else configuration.get("temperature", 0.2)
+
+        is_claude_model = "claude" in model_name
+        if is_claude_model:
+            max_tokens = _get_anthropic_max_tokens(model_name)
+            return ChatAnthropic(
+                model=model_name,
+                base_url=configuration.get("endpoint"),
+                temperature=temperature,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
+                api_key=configuration.get("apiKey"),
+                max_tokens=configuration.get("maxTokens", max_tokens),
+            )
+        else:
+            return ChatOpenAI(
+                    model=model_name,
+                    temperature=temperature,
+                    timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
+                    api_key=configuration.get("apiKey"),
+                    base_url=configuration.get("endpoint"),
+                )
+
     elif provider == LLMProvider.AZURE_OPENAI.value:
         from langchain_openai import AzureChatOpenAI
 
-        is_reasoning_model = "gpt-5" in model_name or configuration.get("isReasoning")
+        is_reasoning_model = "gpt-5" in model_name or config.get("isReasoning", False)
         temperature = 1 if is_reasoning_model else configuration.get("temperature", 0.2)
         return AzureChatOpenAI(
                 api_key=configuration["apiKey"],
                 azure_endpoint=configuration["endpoint"],
                 api_version=AzureOpenAILLM.AZURE_OPENAI_VERSION.value,
                 temperature=temperature,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 azure_deployment=configuration["deploymentName"],
             )
 
@@ -283,6 +393,7 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         return ChatCohere(
                 model=model_name,
                 temperature=0.2,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 cohere_api_key=configuration["apiKey"],
             )
     elif provider == LLMProvider.FIREWORKS.value:
@@ -291,6 +402,7 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         return ChatFireworks(
                 model=model_name,
                 temperature=0.2,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
             )
 
@@ -301,7 +413,7 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
                 model=model_name,
                 temperature=0.2,
                 max_tokens=None,
-                timeout=None,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 max_retries=2,
                 google_api_key=configuration["apiKey"],
             )
@@ -312,6 +424,7 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         return ChatGroq(
                 model=model_name,
                 temperature=0.2,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
             )
 
@@ -321,6 +434,7 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         return ChatMistralAI(
                 model=model_name,
                 temperature=0.2,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
             )
 
@@ -330,17 +444,20 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         return ChatOllama(
                 model=model_name,
                 temperature=0.2,
-                base_url=configuration.get('endpoint', os.getenv("OLLAMA_API_URL", "http://localhost:11434"))
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
+                base_url=configuration.get('endpoint', os.getenv("OLLAMA_API_URL", "http://localhost:11434")),
+                reasoning=False
             )
 
     elif provider == LLMProvider.OPENAI.value:
         from langchain_openai import ChatOpenAI
 
-        is_reasoning_model = "gpt-5" in model_name or configuration.get("isReasoning")
+        is_reasoning_model = "gpt-5" in model_name or config.get("isReasoning", False)
         temperature = 1 if is_reasoning_model else configuration.get("temperature", 0.2)
         return ChatOpenAI(
                 model=model_name,
                 temperature=temperature,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
                 organization=configuration.get("organizationId"),
             )
@@ -351,6 +468,7 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         return ChatXAI(
                 model=model_name,
                 temperature=0.2,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
             )
 
@@ -360,16 +478,19 @@ def get_generator_model(provider: str, config: Dict[str, Any], model_name: str |
         return ChatTogether(
                 model=model_name,
                 temperature=0.2,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
                 base_url=configuration["endpoint"],
             )
 
     elif provider == LLMProvider.OPENAI_COMPATIBLE.value:
         from langchain_openai import ChatOpenAI
-
+        is_reasoning_model = "gpt-5" in model_name or config.get("isReasoning", False)
+        temperature = 1 if is_reasoning_model else configuration.get("temperature", 0.2)
         return ChatOpenAI(
                 model=model_name,
-                temperature=0.2,
+                temperature=temperature,
+                timeout=DEFAULT_LLM_TIMEOUT,  # 6 minute timeout
                 api_key=configuration["apiKey"],
                 base_url=configuration["endpoint"],
             )

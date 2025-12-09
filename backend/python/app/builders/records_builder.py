@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List
 
+from app.config.constants.arangodb import ProgressStatus
 from app.models.records import FileRecord, MailRecord, Record
 from app.utils.time_conversion import get_epoch_timestamp_in_ms
 
@@ -37,6 +38,7 @@ class RecordBuilder:
         self._is_dirty = False
         self._reason = None
         self._web_url = None
+        self._mime_type = None
 
     def with_key(self, key: str) -> 'RecordBuilder':
         self._key = key
@@ -57,7 +59,7 @@ class RecordBuilder:
         return self
 
     def with_type(self, record_type: str) -> 'RecordBuilder':
-        if record_type not in ["FILE", "DRIVE", "WEBPAGE", "MESSAGE", "MAIL", "OTHERS"]:
+        if record_type not in ["FILE", "DRIVE", "WEBPAGE", "COMMENT", "MESSAGE", "MAIL", "OTHERS"]:
             raise ValueError(f"Invalid record type: {record_type}")
         self._record_type = record_type
         return self
@@ -80,8 +82,7 @@ class RecordBuilder:
         return self
 
     def with_indexing_status(self, status: str) -> 'RecordBuilder':
-        valid_statuses = ["NOT_STARTED", "IN_PROGRESS", "PAUSED", "FAILED",
-                         "COMPLETED", "FILE_TYPE_NOT_SUPPORTED", "AUTO_INDEX_OFF"]
+        valid_statuses = [status.value for status in ProgressStatus]
         if status not in valid_statuses:
             raise ValueError(f"Invalid indexing status: {status}")
         self._indexing_status = status
@@ -158,6 +159,11 @@ class RecordBuilder:
         self._web_url = web_url
         return self
 
+    def with_mime_type(self, mime_type: str) -> 'RecordBuilder':
+        self._mime_type = mime_type
+        return self
+
+
     def build(self) -> 'Record':
         """Build and validate the Record instance"""
         if not self._org_id:
@@ -196,7 +202,8 @@ class RecordBuilder:
             last_extraction_timestamp=self._last_extraction_timestamp,
             is_dirty=self._is_dirty,
             reason=self._reason,
-            web_url=self._web_url
+            web_url=self._web_url,
+            mime_type=self._mime_type
         )
 
 class FileRecordBuilder:

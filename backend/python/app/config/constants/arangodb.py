@@ -47,11 +47,24 @@ class Connectors(Enum):
     CONFLUENCE = "CONFLUENCE"
     JIRA = "JIRA"
 
+    DROPBOX = "DROPBOX"
+    DROPBOX_PERSONAL = "DROPBOX PERSONAL"
+    WEB = "WEB"
+    BOOKSTACK = "BOOKSTACK"
+
+    SERVICENOW = "SERVICENOW"
+
+    UNKNOWN = "UNKNOWN"
+
 class AppGroups(Enum):
     GOOGLE_WORKSPACE = "Google Workspace"
     NOTION = "Notion"
     ATLASSIAN = "Atlassian"
     MICROSOFT = "Microsoft"
+    DROPBOX = "Dropbox"
+    SERVICENOW = "Servicenow"
+    WEB = "Web"
+    BOOKSTACK = "BookStack"
 
 class OriginTypes(Enum):
     CONNECTOR = "CONNECTOR"
@@ -62,6 +75,8 @@ class LegacyCollectionNames(Enum):
     PERMISSIONS_TO_KNOWLEDGE_BASE = "permissionsToKnowledgeBase"
     BELONGS_TO_KNOWLEDGE_BASE = "belongsToKnowledgeBase"
     BELONGS_TO_KB = "belongsToKB"
+    PERMISSIONS = "permissions"
+    PERMISSIONS_TO_KB = "permissionsToKB"
 
 class LegacyGraphNames(Enum):
     FILE_ACCESS_GRAPH = "fileAccessGraph"
@@ -75,11 +90,11 @@ class CollectionNames(Enum):
     RECORD_RELATIONS = "recordRelations"
     RECORD_GROUPS = "recordGroups"
     SYNC_POINTS = "syncPoints"
+    INHERIT_PERMISSIONS = "inheritPermissions"
 
     # Knowledge base
     IS_OF_TYPE = "isOfType"
     PERMISSION = "permission"
-    PERMISSIONS_TO_KB = "permissionsToKB"
 
     # Drive related
     DRIVES = "drives"
@@ -91,12 +106,14 @@ class CollectionNames(Enum):
     MAILS = "mails"
     #MESSAGES = "messages"
     WEBPAGES = "webpages"
+    COMMENTS = "comments"
     TICKETS = "tickets"
 
     # Users and groups
     PEOPLE = "people"
     USERS = "users"
     GROUPS = "groups"
+    ROLES = "roles"
     ORGS = "organizations"
     # DOMAINS = "domains"
     ANYONE = "anyone"
@@ -118,8 +135,6 @@ class CollectionNames(Enum):
     SUBCATEGORIES3 = "subcategories3"
     INTER_CATEGORY_RELATIONS = "interCategoryRelations"
 
-    # Permissions
-    PERMISSIONS = "permissions"
 
     # Other
     CHANNEL_HISTORY = "channelHistory"
@@ -161,6 +176,13 @@ class ExtensionTypes(Enum):
     MD = "md"
     MDX = "mdx"
     HTML = "html"
+    PNG = "png"
+    JPG = "jpg"
+    JPEG = "jpeg"
+    WEBP = "webp"
+    SVG = "svg"
+    HEIC = "heic"
+    HEIF = "heif"
 
 class MimeTypes(Enum):
     PDF = "application/pdf"
@@ -182,7 +204,24 @@ class MimeTypes(Enum):
     NOTION_PAGE_COMMENT_TEXT = "notion/pageCommentText"
     HTML = "text/html"
     PLAIN_TEXT = "text/plain"
-
+    MARKDOWN = "text/markdown"
+    MDX = "text/mdx"
+    GENESIS_32X_ROM = "application/x-genesis-32x-rom"
+    JSON = "application/json"
+    BLOCKS = "application/blocks"
+    XML = "application/xml"
+    YAML = "application/yaml"
+    UNKNOWN = "application/unknown"
+    PNG = "image/png"
+    JPG = "image/jpg"
+    JPEG = "image/jpeg"
+    WEBP = "image/webp"
+    SVG = "image/svg+xml"
+    HEIC = "image/heic"
+    HEIF = "image/heif"
+    TEXT = "text/plain"
+    ZIP = "application/zip"
+    GIF = "image/gif"
 
 class ProgressStatus(Enum):
     NOT_STARTED = "NOT_STARTED"
@@ -192,6 +231,10 @@ class ProgressStatus(Enum):
     FAILED = "FAILED"
     FILE_TYPE_NOT_SUPPORTED = "FILE_TYPE_NOT_SUPPORTED"
     AUTO_INDEX_OFF = "AUTO_INDEX_OFF"
+    EMPTY = "EMPTY"
+    ENABLE_MULTIMODAL_MODELS = "ENABLE_MULTIMODAL_MODELS"
+    QUEUED = "QUEUED"
+
 
 class RecordTypes(Enum):
     FILE = "FILE"
@@ -200,6 +243,7 @@ class RecordTypes(Enum):
     MAIL = "MAIL"
     DRIVE = "DRIVE"
     WEBPAGE = "WEBPAGE"
+    COMMENT = "COMMENT"
     TICKET = "TICKET"
     MESSAGE = "MESSAGE"
     WEBPAGE_COMMENT = "WEBPAGE_COMMENT"
@@ -225,3 +269,15 @@ class AccountType(Enum):
     ENTERPRISE = "enterprise"
     BUSINESS = "business"
     ADMIN = "admin"
+
+RECORD_TYPE_COLLECTION_MAPPING = {
+    "FILE": CollectionNames.FILES.value,
+    "MAIL": CollectionNames.MAILS.value,
+    "WEBPAGE": CollectionNames.WEBPAGES.value,
+    "CONFLUENCE_PAGE": CollectionNames.WEBPAGES.value,
+    "CONFLUENCE_BLOGPOST": CollectionNames.WEBPAGES.value,
+    "TICKET": CollectionNames.TICKETS.value,
+    "COMMENT": CollectionNames.COMMENTS.value,
+    "INLINE_COMMENT": CollectionNames.COMMENTS.value,
+    # Note: MESSAGE, DRIVE, SHAREPOINT_*, and other types are stored only in records collection
+}

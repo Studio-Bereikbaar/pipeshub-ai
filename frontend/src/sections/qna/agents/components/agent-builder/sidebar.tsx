@@ -103,6 +103,9 @@ import jiraIcon from '@iconify-icons/logos/jira';
 import slackIcon from '@iconify-icons/logos/slack-icon';
 import cogOutlineIcon from '@iconify-icons/mdi/cog-outline';
 import calculatorIcon from '@iconify-icons/mdi/calculator';
+import googleDocsIcon from '@iconify-icons/logos/google';
+import googleMeetIcon from '@iconify-icons/logos/google-meet';
+import notionIcon from '@iconify-icons/logos/notion';
 import { useConnectors } from '../../../../accountdetails/connectors/context';
 
 // Utility functions
@@ -116,7 +119,7 @@ interface NodeTemplate {
   defaultConfig: Record<string, any>;
   inputs: string[];
   outputs: string[];
-  category: 'inputs' | 'llm' | 'tools' | 'memory' | 'outputs' | 'agent';
+  category: 'inputs' | 'llm' | 'tools' | 'knowledge' | 'outputs' | 'agent';
 }
 
 interface FlowBuilderSidebarProps {
@@ -138,7 +141,7 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
     'Input / Output': true,
     Agents: false,
     'LLM Models': false,
-    Memory: false,
+    Knowledge: false,
     Tools: true,
     'Vector Stores': false,
   });
@@ -175,6 +178,7 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
       jira: 'Jira',
       slack: 'Slack',
       google_drive_enterprise: 'Google Drive Enterprise',
+      calendar: 'Calendar',
     };
 
     return (
@@ -187,23 +191,45 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
   };
 
   // Get app-level tool nodes (tool-group-* nodes)
+  // Exclude internal tools: calculator and retrieval
   const appToolNodes = useMemo(
     () =>
-      filteredTemplates.filter((t) => t.category === 'tools' && t.type.startsWith('tool-group-')),
+      filteredTemplates.filter(
+        (t) =>
+          t.category === 'tools' &&
+          t.type.startsWith('tool-group-') &&
+          !['calculator', 'retrieval'].includes(
+            (t.defaultConfig?.appName || '').toLowerCase()
+          ) &&
+          !['calculator', 'retrieval'].includes(
+            (t.defaultConfig?.appDisplayName || '').toLowerCase()
+          )
+      ),
     [filteredTemplates]
   );
 
   // Group individual tools by app name for dropdown
+  // Exclude internal tools: calculator and retrieval
   const groupedByApp = useMemo(() => {
     const individualTools = filteredTemplates.filter(
       (t) =>
-        t.category === 'tools' && t.type.startsWith('tool-') && !t.type.startsWith('tool-group-')
+        t.category === 'tools' &&
+        t.type.startsWith('tool-') &&
+        !t.type.startsWith('tool-group-') &&
+        !['calculator', 'retrieval'].includes(
+          (t.defaultConfig?.appName || '').toLowerCase()
+        )
     );
     const grouped: Record<string, NodeTemplate[]> = {};
 
     individualTools.forEach((template) => {
       const appName = template.defaultConfig?.appName || 'Other';
       const displayName = normalizeAppName(appName);
+
+      // Skip if it's an internal tool
+      if (['calculator', 'retrieval'].includes(displayName.toLowerCase())) {
+        return;
+      }
 
       if (!grouped[displayName]) {
         grouped[displayName] = [];
@@ -220,7 +246,7 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
     [filteredTemplates]
   );
 
-  const appMemoryGroupNode = useMemo(
+  const appKnowledgeGroupNode = useMemo(
     () => filteredTemplates.find((t) => t.type === 'app-group'),
     [filteredTemplates]
   );
@@ -228,15 +254,15 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
   const individualKBs = useMemo(
     () =>
       filteredTemplates.filter(
-        (t) => t.category === 'memory' && t.type.startsWith('kb-') && t.type !== 'kb-group'
+        (t) => t.category === 'knowledge' && t.type.startsWith('kb-') && t.type !== 'kb-group'
       ),
     [filteredTemplates]
   );
 
-  const individualAppMemory = useMemo(
+  const individualAppKnowledge = useMemo(
     () =>
       filteredTemplates.filter(
-        (t) => t.category === 'memory' && t.type.startsWith('app-') && t.type !== 'app-group'
+        (t) => t.category === 'knowledge' && t.type.startsWith('app-') && t.type !== 'app-group'
       ),
     [filteredTemplates]
   );
@@ -266,7 +292,7 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
     let isDynamicIcon = false;
 
     if (sectionType === 'apps' && template.defaultConfig?.appName) {
-      const appIcon = getAppMemoryIcon(template.defaultConfig.appName);
+      const appIcon = getAppKnowledgeIcon(template.defaultConfig.appName);
       if (appIcon === 'dynamic-icon') {
         isDynamicIcon = true;
         // Find the connector for dynamic icon
@@ -277,10 +303,18 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
         );
         itemIcon = connector?.iconPath || '/assets/icons/connectors/default.svg';
       } else {
+        if (typeof appIcon === 'string' || appIcon.toString().includes('/assets/icons/connectors/')) {
+          isDynamicIcon = true;
+        }
         itemIcon = appIcon;
       }
     } else if (sectionType === 'tools' && template.defaultConfig?.appName) {
       itemIcon = getToolIcon(template.type, template.defaultConfig.appName);
+    }
+
+    // Generic string-path icon support
+    if (!isDynamicIcon && typeof itemIcon === 'string') {
+      isDynamicIcon = true;
     }
 
     // Get appropriate hover color based on section
@@ -402,12 +436,25 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
           height={14}
           style={{ color: theme.palette.text.secondary }}
         />
-        <Icon
-          icon={groupIcon}
-          width={18}
-          height={18}
-          style={{ color: theme.palette.text.secondary }}
-        />
+        {typeof groupIcon === 'string' && groupIcon.toString().includes('assets/icons/connectors/') ? (
+          <img
+            src={groupIcon}
+            alt={groupLabel}
+            width={18}
+            height={18}
+            style={{ objectFit: 'contain' }}
+            onError={(e) => {
+              e.currentTarget.src = '/assets/icons/connectors/default.svg';
+            }}
+          />
+        ) : (
+          <Icon
+            icon={groupIcon}
+            width={18}
+            height={18}
+            style={{ color: theme.palette.text.secondary }}
+          />
+        )}
         <Typography
           variant="body2"
           sx={{
@@ -480,9 +527,9 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
       categories: ['llm'],
     },
     {
-      name: 'Memory',
+      name: 'Knowledge',
       icon: dataIcon,
-      categories: ['memory'],
+      categories: ['knowledge'],
     },
     {
       name: 'Tools',
@@ -507,11 +554,34 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
       Jira: jiraIcon,
       Slack: slackIcon,
       'Google Drive Enterprise': googleDriveIcon,
+      Calendar: googleCalendarIcon,
+      Drive: googleDriveIcon,
+      Docs: googleDocsIcon,
+      Meet: googleMeetIcon,
+      Notion: '/assets/icons/connectors/notion.svg',
+      Onedrive: microsoftOnedriveIcon,
+      Sharepointonline: '/assets/icons/connectors/sharepoint.svg',
+      Outlook: '/assets/icons/connectors/outlook.svg',
+      Discord: '/assets/icons/connectors/discord.svg',
+      Linear: '/assets/icons/connectors/linear.svg',
+      LinkedIn: '/assets/icons/connectors/linkedin.svg',
+      Dropbox: '/assets/icons/connectors/dropbox.svg',
+      Freshdesk: '/assets/icons/connectors/freshdesk.svg',
+      Zendesk: '/assets/icons/connectors/zendesk.svg',
+      Posthog: '/assets/icons/connectors/posthog.svg',
+      Box: '/assets/icons/connectors/box.svg',
+      Bookstack: '/assets/icons/connectors/bookstack.svg',
+      Azureblob: '/assets/icons/connectors/azureblob.svg',
+      Airtable: '/assets/icons/connectors/airtable.svg',
+      Evernote: '/assets/icons/connectors/evernote.svg',
+      S3: '/assets/icons/connectors/s3.svg',
+      Github: '/assets/icons/connectors/github.svg',
+      Gitlab: '/assets/icons/connectors/gitlab.svg',
     };
     return iconMap[appName] || applicationIcon;
   };
 
-  const getAppMemoryIcon = (appName: string) => {
+  const getAppKnowledgeIcon = (appName: string) => {
     // First try to find the connector in our dynamic data
     const connector = allConnectors.find(
       (c) => c.name.toUpperCase() === appName.toUpperCase() || c.name === appName
@@ -541,7 +611,16 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
       Calculator: calculatorIcon,
       'Google Drive': googleDriveIcon,
       'Google Workspace': googleWorkspaceIcon,
+      Calendar: googleCalendarIcon,
+      Drive: googleDriveIcon,
+      Docs: googleDocsIcon,
+      Meet: googleMeetIcon,
+      Notion: notionIcon,
+      Onedrive: microsoftOnedriveIcon,
+      Sharepoint: 'assets/icons/connectors/sharepoint.svg',
+      Outlook: 'assets/icons/connectors/outlook.svg',
     };
+
     return iconMap[appName] || cloudIcon;
   };
 
@@ -930,23 +1009,23 @@ const FlowBuilderSidebar: React.FC<FlowBuilderSidebarProps> = ({
                       <List dense sx={{ py: 0 }}>
                         {categoryTemplates.map((template) => renderDraggableItem(template))}
                       </List>
-                    ) : config.name === 'Memory' ? (
+                    ) : config.name === 'Knowledge' ? (
                       <Box sx={{ pl: 0 }}>
                         {/* App Memory group with dropdown */}
-                        {appMemoryGroupNode && (
+                        {appKnowledgeGroupNode && (
                           <>
                             {renderExpandableGroup(
-                              appMemoryGroupNode.label,
-                              appMemoryGroupNode.icon,
-                              individualAppMemory.length,
+                              appKnowledgeGroupNode.label,
+                              appKnowledgeGroupNode.icon,
+                              individualAppKnowledge.length,
                               expandedApps.app,
                               () => handleAppToggle('app'),
-                              appMemoryGroupNode.type,
+                              appKnowledgeGroupNode.type,
                               theme.palette.info.main
                             )}
                             <Collapse in={expandedApps.app} timeout="auto" unmountOnExit>
                               {renderDropdownContent(
-                                individualAppMemory,
+                                individualAppKnowledge,
                                 theme.palette.info.main,
                                 'apps'
                               )}

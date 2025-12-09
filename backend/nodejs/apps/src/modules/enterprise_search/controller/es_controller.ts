@@ -8,6 +8,13 @@ import {
   buildAgentConversationFilter,
   buildAgentSharedWithMeFilter,
   deleteAgentConversation,
+  replaceMessageWithError,
+  initializeSSEResponse,
+  sendSSEErrorEvent,
+  sendSSECompleteEvent,
+  handleRegenerationStreamData,
+  handleRegenerationSuccess,
+  handleRegenerationError,
 } from './../utils/utils';
 import { Response, NextFunction } from 'express';
 import mongoose, { ClientSession, Types } from 'mongoose';
@@ -20,6 +27,11 @@ import {
   BadRequestError,
   InternalServerError,
   NotFoundError,
+  UnauthorizedError,
+  ForbiddenError,
+  ServiceUnavailableError,
+  BadGatewayError,
+  GatewayTimeoutError,
 } from '../../../libs/errors/http.errors';
 import {
   AICommandOptions,
@@ -29,6 +41,7 @@ import { HttpMethod } from '../../../libs/enums/http-methods.enum';
 import {
   AIServiceResponse,
   IAgentConversation,
+  IAIModel,
   IAIResponse,
   IConversationDocument,
   IMessage,
@@ -49,6 +62,7 @@ import {
   buildSharedWithMeFilter,
   buildSortOptions,
   buildUserQueryMessage,
+  extractModelInfo,
   formatPreviousConversations,
   getPaginationParams,
   sortMessages,
@@ -63,7 +77,10 @@ import Citation, {
   ICitation,
 } from '../schema/citation.schema';
 import { CONVERSATION_STATUS } from '../constants/constants';
-import { AgentConversation, IAgentConversationDocument } from '../schema/agent.conversation.schema';
+import {
+  AgentConversation,
+  IAgentConversationDocument,
+} from '../schema/agent.conversation.schema';
 import { Users } from '../../user_management/schema/users.schema';
 import { AuthTokenService } from '../../../libs/services/authtoken.service';
 
@@ -71,6 +88,80 @@ const logger = Logger.getInstance({ service: 'Enterprise Search Service' });
 const rsAvailable = process.env.REPLICA_SET_AVAILABLE === 'true';
 const AI_SERVICE_UNAVAILABLE_MESSAGE =
   'AI Service is currently unavailable. Please check your network connection or try again later.';
+
+  const handleBackendError = (error: any, operation: string): Error => {
+    // Network/connection failure handling first
+    if (
+      (error?.cause && error.cause.code === 'ECONNREFUSED') ||
+    (typeof error?.message === 'string' &&
+      error.message.includes('fetch failed'))
+    ) {
+      return new ServiceUnavailableError(AI_SERVICE_UNAVAILABLE_MESSAGE, error);
+    }
+
+    if (error.response) {
+      const { status, data } = error.response;
+      const errorDetail =
+        data?.detail || data?.reason || data?.message || 'Unknown error';
+  
+      logger.error(`Backend error during ${operation}`, {
+        status,
+        errorDetail,
+        fullResponse: data,
+      });
+  
+      switch (status) {
+        case 400:
+          return new BadRequestError(errorDetail);
+        case 401:
+          return new UnauthorizedError(errorDetail);
+        case 403:
+          return new ForbiddenError(errorDetail);
+        case 404:
+          return new NotFoundError(errorDetail);
+        case 500:
+          return new InternalServerError(errorDetail);
+        case 502:
+          return new BadGatewayError(errorDetail);
+        case 503:
+          return new ServiceUnavailableError(errorDetail);
+        case 504:
+          return new GatewayTimeoutError(errorDetail);
+        default:
+          return new InternalServerError(`Backend error: ${errorDetail}`);
+      }
+    }
+  
+    if (error.request) {
+      logger.error(`No response from backend during ${operation}`);
+      return new ServiceUnavailableError('Backend service unavailable');
+    }
+
+  if (error.detail) {
+      return new BadRequestError(error.detail);
+    }
+  
+    return new InternalServerError(`${operation} failed: ${error.message}`);
+  };
+  
+  // Common helper to start AI streams with consistent error mapping and logging
+  const startAIStream = async (
+    options: AICommandOptions,
+    operation: string,
+    logContext: Record<string, any> = {},
+  ) => {
+    const aiServiceCommand = new AIServiceCommand(options);
+    try {
+      return await aiServiceCommand.executeStream();
+    } catch (error: any) {
+      const mappedError = handleBackendError(error, operation);
+      logger.error('AI service stream start failed', {
+        ...logContext,
+        message: error?.message,
+      });
+      throw mappedError;
+    }
+  };
 
 export const streamChat =
   (appConfig: AppConfig) =>
@@ -82,6 +173,8 @@ export const streamChat =
 
     let session: ClientSession | null = null;
     let savedConversation: IConversationDocument | null = null;
+
+    const modelInfo = extractModelInfo(req.body);
 
     try {
       // Set SSE headers
@@ -110,6 +203,8 @@ export const streamChat =
         messages: [userQueryMessage] as IMessageDocument[],
         lastActivityAt: Date.now(),
         status: CONVERSATION_STATUS.INPROGRESS,
+        // Store model and mode information
+        modelInfo: modelInfo,
       };
 
       // Start transaction if replica set is available
@@ -143,7 +238,7 @@ export const streamChat =
         // New fields for multi-model support
         modelKey: req.body.modelKey || null,
         modelName: req.body.modelName || null,
-        chatMode: req.body.chatMode || 'standard',
+        chatMode: req.body.chatMode || 'quick',
       };
 
       const aiCommandOptions: AICommandOptions = {
@@ -156,8 +251,9 @@ export const streamChat =
         body: aiPayload,
       };
 
-      const aiServiceCommand = new AIServiceCommand(aiCommandOptions);
-      const stream = await aiServiceCommand.executeStream();
+      const stream = await startAIStream(aiCommandOptions, 'Chat Stream', {
+        requestId,
+      });
 
       if (!stream) {
         throw new Error('Failed to get stream from AI service');
@@ -241,6 +337,7 @@ export const streamChat =
               completeData,
               orgId,
               session,
+              modelInfo,
             );
 
             // Send the final conversation data in the same format as createConversation
@@ -272,6 +369,7 @@ export const streamChat =
               savedConversation as IConversationDocument,
               'No complete response received from AI service',
               session,
+              'incomplete_response',
             );
 
             // Send error event
@@ -287,6 +385,16 @@ export const streamChat =
             conversationId: savedConversation?._id,
             error: dbError.message,
           });
+
+          if (savedConversation) {
+            await markConversationFailed(
+              savedConversation as IConversationDocument,
+              `Failed to save conversation: ${dbError.message}`,
+              session,
+              'database_error',
+              dbError.stack,
+            );
+          }
 
           // Send error event
           res.write(
@@ -309,6 +417,8 @@ export const streamChat =
               savedConversation as IConversationDocument,
               `Stream error: ${error.message}`,
               session,
+              'stream_error',
+              error.stack,
             );
           }
         } catch (dbError: any) {
@@ -336,6 +446,8 @@ export const streamChat =
             savedConversation as IConversationDocument,
             error.message || 'Internal server error',
             session,
+            'internal_error',
+            error.stack,
           );
         }
       } catch (dbError: any) {
@@ -348,7 +460,11 @@ export const streamChat =
       if (!res.headersSent) {
         res.writeHead(500, { 'Content-Type': 'text/event-stream' });
       }
-
+      logger.error('Error in streamChat', {
+        requestId,
+        error: error.message,
+        stack: error.stack,
+      });
       const errorEvent = `event: error\ndata: ${JSON.stringify({
         error: error.message || 'Internal server error',
         details: error.message,
@@ -443,6 +559,8 @@ export const createConversation =
     let session: ClientSession | null = null;
     let responseData: any;
 
+    const modelInfo = extractModelInfo(req.body);
+
     // Helper function that contains the common conversation operations.
     async function createConversationUtil(
       session?: ClientSession | null,
@@ -457,6 +575,7 @@ export const createConversation =
         messages: [userQueryMessage] as IMessageDocument[],
         lastActivityAt: Date.now(),
         status: CONVERSATION_STATUS.INPROGRESS,
+        modelInfo: modelInfo,
       };
 
       const conversation = new Conversation(userConversationData);
@@ -479,7 +598,7 @@ export const createConversation =
           // New fields for multi-model support
           modelKey: req.body.modelKey || null,
           modelName: req.body.modelName || null,
-          chatMode: req.body.chatMode || 'standard',
+          chatMode: req.body.chatMode || 'quick',
         },
       };
 
@@ -532,6 +651,7 @@ export const createConversation =
         const aiResponseMessage = buildAIResponseMessage(
           aiResponseData,
           citations,
+          modelInfo,
         ) as IMessageDocument;
         // Add the AI message to the conversation
         savedConversation.messages.push(aiResponseMessage);
@@ -665,6 +785,7 @@ export const addMessage =
     const requestId = req.context?.requestId;
     const startTime = Date.now();
     let session: ClientSession | null = null;
+    const modelInfo = extractModelInfo(req.body);
 
     try {
       let userId: Types.ObjectId | undefined;
@@ -791,7 +912,7 @@ export const addMessage =
             // New fields for multi-model support
             modelKey: req.body.modelKey || null,
             modelName: req.body.modelName || null,
-            chatMode: req.body.chatMode || 'standard',
+            chatMode: req.body.chatMode || 'quick',
           },
         };
         try {
@@ -871,6 +992,7 @@ export const addMessage =
           const aiResponseMessage = buildAIResponseMessage(
             aiResponseData,
             savedCitations,
+            modelInfo,
           ) as IMessageDocument;
           // Add the AI message to the existing conversation
           savedConversation.messages.push(aiResponseMessage);
@@ -1000,6 +1122,8 @@ export const addMessageStream =
     let session: ClientSession | null = null;
     let existingConversation: IConversationDocument | null = null;
 
+    const modelInfo = extractModelInfo(req.body);
+
     // Helper function that contains the common conversation operations
     async function performAddMessageStream(
       session?: ClientSession | null,
@@ -1019,6 +1143,20 @@ export const addMessageStream =
       // Update status to processing when adding a new message
       conversation.status = CONVERSATION_STATUS.INPROGRESS;
       conversation.failReason = undefined; // Clear previous error if any
+
+      // Update model and mode information if provided
+      const fieldsToUpdate: Array<keyof IAIModel> = [
+        'modelKey',
+        'modelName',
+        'modelProvider',
+        'chatMode',
+      ];
+      for (const field of fieldsToUpdate) {
+        const value = req.body[field];
+        if (value !== undefined && value !== null) {
+          (conversation.modelInfo as IAIModel)[field] = value;
+        }
+      }
 
       // First, add the user message to the existing conversation
       conversation.messages.push(
@@ -1099,7 +1237,7 @@ export const addMessageStream =
         // New fields for multi-model support
         modelKey: req.body.modelKey || null,
         modelName: req.body.modelName || null,
-        chatMode: req.body.chatMode || 'standard',
+        chatMode: req.body.chatMode || 'quick',
       };
 
       const aiCommandOptions: AICommandOptions = {
@@ -1112,8 +1250,11 @@ export const addMessageStream =
         body: aiPayload,
       };
 
-      const aiServiceCommand = new AIServiceCommand(aiCommandOptions);
-      const stream = await aiServiceCommand.executeStream();
+      const stream = await startAIStream(
+        aiCommandOptions,
+        'Add Message Stream',
+        { requestId },
+      );
 
       if (!stream) {
         throw new Error('Failed to get stream from AI service');
@@ -1175,10 +1316,19 @@ export const addMessageStream =
             } else if (eventType === 'error' && dataLine) {
               try {
                 const errorData = JSON.parse(dataLine);
+                const errorMessage =
+                  errorData.error ||
+                  errorData.message ||
+                  'Unknown error occurred';
                 markConversationFailed(
                   existingConversation as IConversationDocument,
-                  errorData.error,
+                  errorMessage,
                   session,
+                  'streaming_error',
+                  errorData.stack,
+                  errorData.metadata
+                    ? new Map(Object.entries(errorData.metadata))
+                    : undefined,
                 );
                 filteredChunk += event + '\n\n';
               } catch (parseError: any) {
@@ -1187,6 +1337,16 @@ export const addMessageStream =
                   parseError: parseError.message,
                   dataLine,
                 });
+                const errorMessage = `Failed to parse error event: ${parseError.message}`;
+                if (existingConversation) {
+                  markConversationFailed(
+                    existingConversation as IConversationDocument,
+                    errorMessage,
+                    session,
+                    'parse_error',
+                    parseError.stack,
+                  );
+                }
                 filteredChunk += event + '\n\n';
               }
             } else {
@@ -1229,6 +1389,7 @@ export const addMessageStream =
               const aiResponseMessage = buildAIResponseMessage(
                 { statusCode: 200, data: completeData },
                 savedCitations,
+                modelInfo,
               ) as IMessageDocument;
 
               // Add the AI message to the existing conversation
@@ -1378,10 +1539,12 @@ export const addMessageStream =
         logger.error('Stream error', { requestId, error: error.message });
         try {
           if (existingConversation) {
-            markConversationFailed(
+            await markConversationFailed(
               existingConversation as IConversationDocument,
               error.message,
               session,
+              'stream_error',
+              error.stack,
             );
           }
         } catch (dbError: any) {
@@ -1628,6 +1791,7 @@ export const getConversationById = async (
         sharedWith: 1,
         status: 1,
         failReason: 1,
+        modelInfo:1,
       })
       .populate({
         path: 'messages.citations.citationId',
@@ -2157,223 +2321,461 @@ export const unshareConversationById = async (
   }
 };
 
-export const regenerateAnswers =
-  (appConfig: AppConfig) =>
-  async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
-    const requestId = req.context?.requestId;
-    const startTime = Date.now();
-    let session: ClientSession | null = null;
-    const { conversationId, messageId } = req.params;
-    try {
-      const userId = req.user?.userId;
-      const orgId = req.user?.orgId;
+/**
+ * Configuration for regeneration function
+ */
+interface RegenerationConfig {
+  conversationModel: typeof Conversation | typeof AgentConversation;
+  buildQueryFilter: (
+    conversationId: string,
+    orgId: string | undefined,
+    userId: string | undefined,
+    agentKey?: string,
+  ) => any;
+  buildAIEndpoint: (appConfig: AppConfig, agentKey?: string) => string;
+}
 
-      logger.debug('Attempting to regenerate answers', {
-        requestId,
-        conversationId,
-        messageId,
-        timestamp: new Date().toISOString(),
-      });
+/**
+ * Generic internal function to handle regeneration for both regular and agent conversations
+ */
+async function regenerateAnswersInternal(
+  appConfig: AppConfig,
+  req: AuthenticatedUserRequest,
+  res: Response,
+  config: RegenerationConfig,
+): Promise<void> {
+  const requestId = req.context?.requestId;
+  const startTime = Date.now();
+  let session: ClientSession | null = null;
+  const { conversationId, messageId, agentKey } = req.params;
+  const userId = req.user?.userId;
+  const orgId = req.user?.orgId;
 
-      // Common helper that performs all operations needed to regenerate the answer.
-      async function performRegenerateAnswers(session?: ClientSession | null) {
-        // Get conversation with access control
-        const conversation = await Conversation.findOne({
-          _id: conversationId,
-          orgId,
-          userId,
-          isDeleted: false,
-          $or: [
-            { initiator: userId },
-            { 'sharedWith.userId': userId },
-            { isShared: true },
-          ],
-        });
+  let existingConversation:
+    | IConversationDocument
+    | IAgentConversationDocument
+    | null = null;
+  let messageIndex = -1;
 
-        if (!conversation) {
-          throw new NotFoundError('Conversation not found or unauthorized');
-        }
+  const modelInfo = extractModelInfo(req.body);
 
-        // Ensure there are messages
-        if (!conversation.messages || conversation.messages.length === 0) {
-          throw new BadRequestError('No messages found in conversation');
-        }
+  // Helper function to validate and get conversation
+  async function performRegenerateAnswersValidation(
+    session?: ClientSession | null,
+  ): Promise<IConversationDocument | IAgentConversationDocument> {
+    if (!conversationId) {
+      throw new BadRequestError('Conversation ID is required');
+    }
 
-        // Get the last message and validate it
-        const lastMessage: IMessageDocument = conversation.messages[
-          conversation.messages.length - 1
-        ] as IMessageDocument;
+    // Get conversation with access control
+    const queryFilter = config.buildQueryFilter(
+      conversationId,
+      orgId,
+      userId,
+      agentKey,
+    );
 
-        if (lastMessage._id?.toString() !== messageId) {
-          throw new BadRequestError(
-            'Can only regenerate the last message in the conversation',
-          );
-        }
-        if (lastMessage.messageType !== 'bot_response') {
-          throw new BadRequestError(
-            'Can only regenerate bot response messages',
-          );
-        }
+    // Type assertion needed because TypeScript can't infer the correct overload
+    const conversation = await (config.conversationModel as any).findOne(
+      queryFilter,
+      null,
+      session ? { session } : undefined,
+    );
 
-        // Get user query from the previous message
-        if (conversation.messages.length < 2) {
-          throw new BadRequestError(
-            'No user query found to regenerate response',
-          );
-        }
-        const userQuery = conversation.messages[
-          conversation.messages.length - 2
-        ] as IMessageDocument;
-        if (userQuery.messageType !== 'user_query') {
-          throw new BadRequestError('Previous message must be a user query');
-        }
+    if (!conversation) {
+      throw new NotFoundError('Conversation not found or unauthorized');
+    }
 
-        // Format previous conversations up to this message
-        const previousConversations = formatPreviousConversations(
-          conversation.messages.slice(0, -2), // Exclude last bot response and user query
-        );
+    // Ensure there are messages
+    if (!conversation.messages || conversation.messages.length === 0) {
+      throw new BadRequestError('No messages found in conversation');
+    }
 
-        // Get new AI response
-        const aiCommand = new AIServiceCommand({
-          uri: `${appConfig.aiBackend}/api/v1/chat`,
-          method: HttpMethod.POST,
-          headers: req.headers as Record<string, string>,
-          body: {
-            query: userQuery.content,
-            previousConversations: previousConversations || [],
-          },
-        });
-        let aiResponse;
-        try {
-          aiResponse =
-            (await aiCommand.execute()) as AIServiceResponse<IAIResponse>;
-        } catch (error: any) {
-          if (error.cause && error.cause.code === 'ECONNREFUSED') {
-            throw new InternalServerError(
-              AI_SERVICE_UNAVAILABLE_MESSAGE,
-              error,
+    // Get the last message and validate it
+    const lastMessage: IMessageDocument = conversation.messages[
+      conversation.messages.length - 1
+    ] as IMessageDocument;
+
+    if (lastMessage._id?.toString() !== messageId) {
+      throw new BadRequestError(
+        'Can only regenerate the last message in the conversation',
+      );
+    }
+    if (lastMessage.messageType !== 'bot_response') {
+      throw new BadRequestError('Can only regenerate bot response messages');
+    }
+
+    // Get user query from the previous message
+    if (conversation.messages.length < 2) {
+      throw new BadRequestError('No user query found to regenerate response');
+    }
+    const userQuery = conversation.messages[
+      conversation.messages.length - 2
+    ] as IMessageDocument;
+    if (userQuery.messageType !== 'user_query') {
+      throw new BadRequestError('Previous message must be a user query');
+    }
+
+    messageIndex = conversation.messages.length - 1;
+
+    logger.debug('Regenerate answers validation passed', {
+      requestId,
+      conversationId,
+      messageId,
+      messageIndex,
+      timestamp: new Date().toISOString(),
+    });
+
+    return conversation;
+  }
+
+  try {
+    // Initialize SSE response
+    initializeSSEResponse(res);
+
+    logger.debug('Attempting to regenerate answers via stream', {
+      requestId,
+      conversationId,
+      messageId,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Validate conversation and message
+    if (rsAvailable) {
+      session = await mongoose.startSession();
+      existingConversation = await session.withTransaction(() =>
+        performRegenerateAnswersValidation(session),
+      );
+    } else {
+      existingConversation = await performRegenerateAnswersValidation();
+    }
+
+    if (!existingConversation || messageIndex === -1) {
+      throw new NotFoundError('Conversation or message not found');
+    }
+
+    // Get user query from the previous message
+    const userQuery = existingConversation.messages[
+      messageIndex - 1
+    ] as IMessageDocument;
+
+    // Format previous conversations up to this message
+    const previousConversations = formatPreviousConversations(
+      existingConversation.messages.slice(0, -2), // Exclude last bot response and user query
+    );
+
+    // Prepare AI payload
+    const aiPayload = {
+      query: userQuery.content,
+      previousConversations: previousConversations || [],
+      filters: req.body.filters || {},
+      // New fields for multi-model support
+      modelKey: req.body.modelKey || null,
+      modelName: req.body.modelName || null,
+      chatMode: req.body.chatMode || 'quick',
+    };
+
+    const aiCommandOptions: AICommandOptions = {
+      uri: config.buildAIEndpoint(appConfig, agentKey),
+      method: HttpMethod.POST,
+      headers: {
+        ...(req.headers as Record<string, string>),
+        'Content-Type': 'application/json',
+      },
+      body: aiPayload,
+    };
+
+    const stream = await startAIStream(
+      aiCommandOptions,
+      'Regenerate Answers Stream',
+      { requestId },
+    );
+
+    if (!stream) {
+      throw new Error('Failed to get stream from AI service');
+    }
+
+    // Variables to collect complete response data
+    let completeData: IAIResponse | null = null;
+    let buffer = '';
+
+    // Handle client disconnect
+    req.on('close', () => {
+      logger.debug('Client disconnected', { requestId });
+      stream.destroy();
+    });
+
+    // Process SSE events, capture complete event, and forward non-complete events
+    stream.on('data', (chunk: Buffer) => {
+      buffer = handleRegenerationStreamData(
+        chunk,
+        buffer,
+        existingConversation,
+        messageIndex,
+        session,
+        requestId || '',
+        res,
+        (data: IAIResponse) => {
+          completeData = data;
+          logger.debug('Captured complete event data from AI backend', {
+            requestId,
+            conversationId: existingConversation?._id,
+            answer: completeData?.answer,
+            citationsCount: completeData?.citations?.length || 0,
+          });
+        },
+      );
+    });
+
+    stream.on('end', async () => {
+      logger.debug('Stream ended successfully', { requestId });
+      try {
+        // Save the AI response to the conversation, replacing the existing message
+        if (completeData && existingConversation) {
+          try {
+            const { conversation: responseConversation, savedCitations } =
+              await handleRegenerationSuccess(
+                completeData,
+                existingConversation,
+                messageIndex,
+                orgId || '',
+                session,
+                modelInfo,
+              );
+
+            // Send final response event with the complete conversation data
+            sendSSECompleteEvent(
+              res,
+              responseConversation,
+              savedCitations.length,
+              requestId || '',
+              startTime,
+            );
+
+            logger.debug(
+              'Answer regenerated and conversation updated, sent custom complete event',
+              {
+                requestId,
+                conversationId: existingConversation._id,
+                messageId,
+                duration: Date.now() - startTime,
+              },
+            );
+          } catch (error: any) {
+            // Update conversation status for general errors
+            if (existingConversation && messageIndex >= 0) {
+              await handleRegenerationError(
+                res,
+                error,
+                existingConversation,
+                messageIndex,
+                conversationId || '',
+                session,
+                requestId || '',
+                'regeneration_error',
+              );
+            }
+
+            if (error.cause && error.cause.code === 'ECONNREFUSED') {
+              throw new InternalServerError(
+                AI_SERVICE_UNAVAILABLE_MESSAGE,
+                error,
+              );
+            }
+            throw error;
+          }
+        } else {
+          // Mark as failed if no complete data received
+          if (existingConversation && messageIndex >= 0) {
+            const errorMessage =
+              'No complete response received from AI service';
+            await replaceMessageWithError(
+              existingConversation,
+              messageIndex,
+              errorMessage,
+              session,
+              'incomplete_response',
+            );
+
+            // Reload conversation to get updated state
+            const updatedConversation = await (config.conversationModel as any).findById(
+              conversationId || '',
+            );
+            if (updatedConversation) {
+              const plainConversation = updatedConversation.toObject();
+              await sendSSEErrorEvent(
+                res,
+                errorMessage,
+                undefined,
+                plainConversation,
+              );
+            } else {
+              await sendSSEErrorEvent(res, errorMessage);
+            }
+          } else {
+            await sendSSEErrorEvent(
+              res,
+              'No complete response received from AI service',
             );
           }
-          logger.error(' Failed error ', error);
-          throw new InternalServerError('Failed to get AI response', error);
         }
-        if (!aiResponse || aiResponse.statusCode !== 200 || !aiResponse.data) {
-          throw new InternalServerError(
-            'Failed to get response from AI service',
-            aiResponse?.data,
+      } catch (dbError: any) {
+        logger.error(
+          'Failed to save regenerated AI response to conversation',
+          {
+            requestId,
+            conversationId: existingConversation?._id,
+            error: dbError.message,
+          },
+        );
+
+        // Try to replace message with error if we have the index
+        if (existingConversation && messageIndex >= 0) {
+          try {
+            const errorMessage = `Failed to save regenerated AI response: ${dbError.message}`;
+            await replaceMessageWithError(
+              existingConversation,
+              messageIndex,
+              errorMessage,
+              session,
+              'database_error',
+              dbError.stack,
+            );
+
+            // Reload conversation to get updated state
+            const updatedConversation = await (config.conversationModel as any).findById(
+              conversationId || '',
+            );
+            if (updatedConversation) {
+              const plainConversation = updatedConversation.toObject();
+              await sendSSEErrorEvent(
+                res,
+                errorMessage,
+                dbError.message,
+                plainConversation,
+              );
+            } else {
+              await sendSSEErrorEvent(res, errorMessage, dbError.message);
+            }
+          } catch (replaceError: any) {
+            logger.error(
+              'Failed to replace message with error in dbError catch',
+              {
+                requestId,
+                error: replaceError.message,
+              },
+            );
+            await sendSSEErrorEvent(
+              res,
+              'Failed to save regenerated AI response',
+              dbError.message,
+            );
+          }
+        } else {
+          await sendSSEErrorEvent(
+            res,
+            'Failed to save regenerated AI response',
+            dbError.message,
           );
         }
-
-        // Create and save citations
-        const savedCitations = await Promise.all(
-          aiResponse.data.citations.map(async (citation: ICitation) => {
-            const newCitation = new Citation({
-              content: citation.content,
-              chunkIndex: citation.chunkIndex ?? 0,
-              citationType: citation.citationType,
-              metadata: {
-                ...citation.metadata,
-                orgId,
-              },
-            });
-            return newCitation.save();
-          }),
-        );
-
-        // Build new AI message while preserving the original message's _id
-        const newMessage = buildAIResponseMessage(
-          aiResponse,
-          savedCitations,
-        ) as IMessageDocument;
-        newMessage._id = lastMessage._id;
-
-        // Update conversation with the new message
-        const updatedConversation = await Conversation.findOneAndUpdate(
-          { _id: conversationId },
-          {
-            $set: {
-              [`messages.${conversation.messages.length - 1}`]: newMessage,
-              lastActivityAt: Date.now(),
-            },
-          },
-          {
-            new: true,
-            session,
-            runValidators: true,
-          },
-        );
-        if (!updatedConversation) {
-          throw new InternalServerError('Failed to update conversation');
-        }
-
-        return {
-          conversation: {
-            id: updatedConversation._id,
-            messages: [
-              {
-                ...newMessage,
-                citations:
-                  newMessage.citations?.map((citation: IMessageCitation) => ({
-                    citationId: citation.citationId,
-                    citationData: savedCitations.find(
-                      (c: ICitation) =>
-                        (c as mongoose.Document).id.toString() ===
-                        citation.citationId?.toString(),
-                    ),
-                  })) || [],
-              },
-            ],
-          },
-        };
       }
 
-      let responseData;
-      if (rsAvailable) {
-        session = await mongoose.startSession();
-        responseData = await session.withTransaction(() =>
-          performRegenerateAnswers(session),
-        );
-      } else {
-        responseData = await performRegenerateAnswers();
-      }
+      res.end();
+    });
 
-      if (session && rsAvailable) {
-        await session.commitTransaction();
-      }
-
-      logger.debug('Answer regenerated successfully', {
+    stream.on('error', async (error: Error) => {
+      logger.error('Stream error in regenerateAnswers', {
         requestId,
-        conversationId,
-        messageId,
-        duration: Date.now() - startTime,
-      });
-
-      res.status(200).json({
-        ...responseData,
-        meta: {
-          requestId,
-          timestamp: new Date().toISOString(),
-          duration: Date.now() - startTime,
-        },
-      });
-    } catch (error: any) {
-      logger.error('Error regenerating answer', {
-        requestId,
-        conversationId,
-        messageId,
         error: error.message,
-        stack: error.stack,
-        duration: Date.now() - startTime,
       });
-      if (session?.inTransaction()) {
-        await session.abortTransaction();
+      try {
+        await handleRegenerationError(
+          res,
+          error,
+          existingConversation,
+          messageIndex,
+          conversationId || '',
+          session,
+          requestId || '',
+          'stream_error',
+        );
+      } catch (dbError: any) {
+        logger.error('Failed to replace message with error', {
+          requestId,
+          conversationId: existingConversation?._id,
+          error: dbError.message,
+        });
+        await sendSSEErrorEvent(
+          res,
+          error.message || 'Stream error occurred',
+          error.message,
+        );
       }
-      next(error);
-    } finally {
-      if (session) {
-        session.endSession();
-      }
+      res.end();
+    });
+  } catch (error: any) {
+    logger.error('Error in regenerateAnswers', {
+      requestId,
+      conversationId,
+      messageId,
+      error: error.message,
+      stack: error.stack,
+    });
+
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'text/event-stream' });
     }
+
+    try {
+      await handleRegenerationError(
+        res,
+        error,
+        existingConversation,
+        messageIndex,
+        conversationId || '',
+        session,
+        requestId || '',
+        'regeneration_error',
+      );
+    } catch (dbError: any) {
+      logger.error('Failed to mark conversation as failed in catch block', {
+        requestId,
+        conversationId,
+        error: dbError.message,
+      });
+      await sendSSEErrorEvent(
+        res,
+        error.message || 'Internal server error',
+        error.message,
+      );
+    }
+    res.end();
+  } finally {
+    if (session) {
+      session.endSession();
+    }
+  }
+}
+
+export const regenerateAnswers =
+  (appConfig: AppConfig) =>
+  async (req: AuthenticatedUserRequest, res: Response) => {
+    await regenerateAnswersInternal(appConfig, req, res, {
+      conversationModel: Conversation,
+      buildQueryFilter: (conversationId, orgId, userId) => ({
+        _id: conversationId,
+        orgId,
+        userId,
+        isDeleted: false,
+        $or: [
+          { initiator: userId },
+          { 'sharedWith.userId': userId },
+          { isShared: true },
+        ],
+      }),
+      buildAIEndpoint: (appConfig) =>
+        `${appConfig.aiBackend}/api/v1/chat/stream`,
+    });
   };
 
 export const updateTitle = async (
@@ -2922,10 +3324,16 @@ export const search =
         logger.error(' Failed error ', error);
         throw new InternalServerError(AI_SERVICE_UNAVAILABLE_MESSAGE, error);
       }
-      if (!aiResponse || aiResponse.statusCode !== 200 || !aiResponse.data) {
-        throw new InternalServerError(
-          'Failed to get response from AI service',
-          aiResponse?.data,
+      
+      if (!aiResponse || !aiResponse.data) {
+        throw new InternalServerError('Failed to get response from AI service');
+      }
+      if (aiResponse.statusCode !== 200) {
+        throw handleBackendError(
+          {
+            response: { status: aiResponse.statusCode, data: aiResponse.data },
+          },
+          'Search',
         );
       }
 
@@ -3560,7 +3968,7 @@ export const createAgentTemplate =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to create agent template');
+        throw handleBackendError(aiResponse.data, 'Create Agent Template');
       }
       const agentTemplate = aiResponse.data;
       res.status(HTTP_STATUS.CREATED).json(agentTemplate);
@@ -3570,7 +3978,8 @@ export const createAgentTemplate =
         message: 'Error creating agent template',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Create Agent Template');
+      next(backendError);
     }
   };
 
@@ -3578,7 +3987,7 @@ export const getAgentTemplate =
   (appConfig: AppConfig) =>
   async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
     const requestId = req.context?.requestId;
-    const {templateId} = req.params;
+    const { templateId } = req.params;
     const orgId = req.user?.orgId;
     const userId = req.user?.userId;
     if (!orgId) {
@@ -3599,7 +4008,7 @@ export const getAgentTemplate =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to get agent template');
+        throw handleBackendError(aiResponse.data, 'Get Agent Template');
       }
       const agentTemplate = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agentTemplate);
@@ -3609,7 +4018,8 @@ export const getAgentTemplate =
         message: 'Error getting agent template',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Get Agent Template');
+      next(backendError);
     }
   };
 
@@ -3637,7 +4047,12 @@ export const listAgentTemplates =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to get agent templates');
+        throw handleBackendError(
+          {
+            response: { status: aiResponse.statusCode, data: aiResponse.data },
+          },
+          'List Agent Templates',
+        );
       }
       const agentTemplates = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agentTemplates);
@@ -3647,7 +4062,8 @@ export const listAgentTemplates =
         message: 'Error getting agent templates',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'List Agent Templates');
+      next(backendError);
     }
   };
 
@@ -3676,7 +4092,7 @@ export const shareAgentTemplate =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to share agent template');
+        throw handleBackendError(aiResponse.data, 'Share Agent Template');
       }
       const agentTemplate = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agentTemplate);
@@ -3686,7 +4102,8 @@ export const shareAgentTemplate =
         message: 'Error sharing agent template',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Share Agent Template');
+      next(backendError);
     }
   };
 
@@ -3716,7 +4133,7 @@ export const updateAgentTemplate =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to update agent template');
+        throw handleBackendError(aiResponse.data, 'Update Agent Template');
       }
       const agentTemplate = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agentTemplate);
@@ -3726,7 +4143,8 @@ export const updateAgentTemplate =
         message: 'Error updating agent template',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Update Agent Template');
+      next(backendError);
     }
   };
 
@@ -3755,7 +4173,7 @@ export const deleteAgentTemplate =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to delete agent template');
+        throw handleBackendError(aiResponse.data, 'Delete Agent Template');
       }
       const agentTemplate = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agentTemplate);
@@ -3765,7 +4183,8 @@ export const deleteAgentTemplate =
         message: 'Error deleting agent template',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Delete Agent Template');
+      next(backendError);
     }
   };
 
@@ -3796,7 +4215,7 @@ export const createAgent =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to create agent');
+        throw handleBackendError(aiResponse.data, 'Create Agent');
       }
       const agent = aiResponse.data;
       res.status(HTTP_STATUS.CREATED).json(agent);
@@ -3806,7 +4225,8 @@ export const createAgent =
         message: 'Error creating agent',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Create Agent');
+      next(backendError);
     }
   };
 
@@ -3835,7 +4255,7 @@ export const getAgent =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to get agent');
+        throw handleBackendError(aiResponse.data, 'Get Agent');
       }
       const agent = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agent);
@@ -3845,7 +4265,8 @@ export const getAgent =
         message: 'Error getting agent',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Get Agent');
+      next(backendError);
     }
   };
 
@@ -3884,7 +4305,8 @@ export const listAgents =
         message: 'Error getting agents',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'List Agents');
+      next(backendError);
     }
   };
 
@@ -3914,7 +4336,7 @@ export const updateAgent =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to update agent');
+        throw handleBackendError(aiResponse.data, 'Update Agent');
       }
       const agent = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agent);
@@ -3924,7 +4346,8 @@ export const updateAgent =
         message: 'Error updating agent',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Update Agent');
+      next(backendError);
     }
   };
 
@@ -3953,7 +4376,7 @@ export const deleteAgent =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to delete agent');
+        throw handleBackendError(aiResponse.data, 'Delete Agent');
       }
       const agent = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agent);
@@ -3963,7 +4386,8 @@ export const deleteAgent =
         message: 'Error deleting agent',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Delete Agent');
+      next(backendError);
     }
   };
 
@@ -3993,7 +4417,7 @@ export const deleteAgent =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to share agent');
+        throw handleBackendError(aiResponse.data, 'Share Agent');
       }
       const agent = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agent);
@@ -4003,10 +4427,10 @@ export const deleteAgent =
         message: 'Error sharing agent',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Share Agent');
+      next(backendError);
     }
   };
-
 
 export const unshareAgent =
   (appConfig: AppConfig) =>
@@ -4034,7 +4458,7 @@ export const unshareAgent =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to unshare agent');
+        throw handleBackendError(aiResponse.data, 'Unshare Agent');
       }
       const agent = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agent);
@@ -4044,7 +4468,8 @@ export const unshareAgent =
         message: 'Error unsharing agent',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(error, 'Unshare Agent');
+      next(backendError);
     }
   };
 
@@ -4074,7 +4499,7 @@ export const unshareAgent =
       const aiCommand = new AIServiceCommand(aiCommandOptions);
       const aiResponse = await aiCommand.execute();
       if (aiResponse && aiResponse.statusCode !== 200) {
-        throw new BadRequestError('Failed to update agent permissions');
+        throw handleBackendError(aiResponse.data, 'Update Agent Permissions');
       }
       const agent = aiResponse.data;
       res.status(HTTP_STATUS.OK).json(agent);
@@ -4084,10 +4509,13 @@ export const unshareAgent =
         message: 'Error updating agent permissions',
         error: error.message,
       });
-      next(error);
+      const backendError = handleBackendError(
+        error,
+        'Update Agent Permissions',
+      );
+      next(backendError);
     }
   };
-
 
   export const streamAgentConversation =
   (appConfig: AppConfig) =>
@@ -4096,10 +4524,12 @@ export const unshareAgent =
     const startTime = Date.now();
     const userId = req.user?.userId;
     const orgId = req.user?.orgId;
-    const {agentKey} = req.params;
+    const { agentKey } = req.params;
 
     let session: ClientSession | null = null;
     let savedConversation: IAgentConversationDocument | null = null;
+
+    const modelInfo = extractModelInfo(req.body);
 
     try {
       // Set SSE headers
@@ -4129,6 +4559,7 @@ export const unshareAgent =
         lastActivityAt: Date.now(),
         status: CONVERSATION_STATUS.INPROGRESS,
         agentKey,
+        modelInfo,
       };
 
       // Start transaction if replica set is available
@@ -4136,11 +4567,14 @@ export const unshareAgent =
         session = await mongoose.startSession();
         await session.withTransaction(async () => {
           const conversation = new AgentConversation(userConversationData);
-          savedConversation = await conversation.save({ session }) as IAgentConversationDocument;
+          savedConversation = (await conversation.save({
+            session,
+          })) as IAgentConversationDocument;
         });
       } else {
         const conversation = new AgentConversation(userConversationData);
-        savedConversation = await conversation.save() as IAgentConversationDocument;
+        savedConversation =
+          (await conversation.save()) as IAgentConversationDocument;
       }
 
       if (!savedConversation) {
@@ -4161,7 +4595,10 @@ export const unshareAgent =
         previousConversations: req.body.previousConversations || [],
         recordIds: req.body.recordIds || [],
         filters: req.body.filters || {},
-        tools: req.body.tools || []
+        tools: req.body.tools || [],
+        chatMode: req.body.chatMode || 'quick',
+        modelKey: req.body.modelKey || null,
+        modelName: req.body.modelName || null,
       };
 
       logger.info('aiPayload', aiPayload);
@@ -4176,8 +4613,11 @@ export const unshareAgent =
         body: aiPayload,
       };
 
-      const aiServiceCommand = new AIServiceCommand(aiCommandOptions);
-      const stream = await aiServiceCommand.executeStream();
+      const stream = await startAIStream(
+        aiCommandOptions,
+        'Agent Chat Stream',
+        { requestId, agentKey },
+      );
 
       if (!stream) {
         throw new Error('Failed to get stream from AI service');
@@ -4262,6 +4702,7 @@ export const unshareAgent =
               completeData,
               orgId,
               session,
+              modelInfo,
             );
 
             // Send the final conversation data in the same format as createConversation
@@ -4285,12 +4726,12 @@ export const unshareAgent =
                 requestId,
                 conversationId: savedConversation._id,
                 duration: Date.now() - startTime,
-                agentKey
+                agentKey,
               },
             );
           } else {
             // Mark as failed if no complete data received
-            await markAgentConversationFailed (
+            await markAgentConversationFailed(
               savedConversation as IAgentConversationDocument,
               'No complete response received from AI service',
               session,
@@ -4328,7 +4769,7 @@ export const unshareAgent =
         try {
           // Mark conversation as failed
           if (savedConversation) {
-            await markAgentConversationFailed (
+            await markAgentConversationFailed(
               savedConversation as IAgentConversationDocument,
               `Stream error: ${error.message}`,
               session,
@@ -4393,9 +4834,11 @@ export const createAgentConversation =
     const startTime = Date.now();
     const userId = req.user?.userId;
     const orgId = req.user?.orgId;
-    const {agentKey} = req.params;
+    const { agentKey } = req.params;
     let session: ClientSession | null = null;
     let responseData: any;
+
+    const modelInfo = extractModelInfo(req.body);
 
     // Helper function that contains the common conversation operations.
     async function createConversationUtil(
@@ -4412,12 +4855,13 @@ export const createAgentConversation =
         lastActivityAt: Date.now(),
         status: CONVERSATION_STATUS.INPROGRESS,
         agentKey,
+        modelInfo,
       };
 
       const conversation = new AgentConversation(userConversationData);
       const savedConversation = session
         ? await conversation.save({ session })
-        : await conversation.save() as IAgentConversationDocument;
+        : ((await conversation.save()) as IAgentConversationDocument);
       if (!savedConversation) {
         throw new InternalServerError('Failed to create conversation');
       }
@@ -4434,7 +4878,7 @@ export const createAgentConversation =
           // New fields for multi-model support
           modelKey: req.body.modelKey || null,
           modelName: req.body.modelName || null,
-          chatMode: req.body.chatMode || 'standard',
+          chatMode: req.body.chatMode || 'quick',
         },
       };
 
@@ -4487,6 +4931,7 @@ export const createAgentConversation =
         const aiResponseMessage = buildAIResponseMessage(
           aiResponseData,
           citations,
+          modelInfo,
         ) as IMessageDocument;
         // Add the AI message to the conversation
         savedConversation.messages.push(aiResponseMessage);
@@ -4615,8 +5060,10 @@ export const createAgentConversation =
   async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
     const requestId = req.context?.requestId;
     const startTime = Date.now();
-    const {agentKey} = req.params;
+    const { agentKey } = req.params;
     let session: ClientSession | null = null;
+
+    const modelInfo = extractModelInfo(req.body);
 
     try {
       const userId = req.user?.userId;
@@ -4665,10 +5112,23 @@ export const createAgentConversation =
         conversation.messages.push(userQueryMessage as IMessageDocument);
         conversation.lastActivityAt = Date.now();
 
+        const fieldsToUpdate: Array<keyof IAIModel> = [
+          'modelKey',
+          'modelName',
+          'modelProvider',
+          'chatMode',
+        ];
+        for (const field of fieldsToUpdate) {
+          const value = req.body[field];
+          if (value !== undefined && value !== null) {
+            (conversation.modelInfo as IAIModel)[field] = value;
+          }
+        }
+
         // Save the user message to the existing conversation first
         const savedConversation = session
           ? await conversation.save({ session })
-          : await conversation.save() as IAgentConversationDocument;
+          : ((await conversation.save()) as IAgentConversationDocument);
 
         if (!savedConversation) {
           throw new InternalServerError(
@@ -4695,7 +5155,7 @@ export const createAgentConversation =
             // New fields for multi-model support
             modelKey: req.body.modelKey || null,
             modelName: req.body.modelName || null,
-            chatMode: req.body.chatMode || 'standard',
+            chatMode: req.body.chatMode || 'quick',
           },
         };
         try {
@@ -4775,6 +5235,7 @@ export const createAgentConversation =
           const aiResponseMessage = buildAIResponseMessage(
             aiResponseData,
             savedCitations,
+            modelInfo,
           ) as IMessageDocument;
           // Add the AI message to the existing conversation
           savedConversation.messages.push(aiResponseMessage);
@@ -4904,6 +5365,8 @@ export const addMessageStreamToAgentConversation =
     let session: ClientSession | null = null;
     let existingConversation: IAgentConversationDocument | null = null;
 
+    const modelInfo = extractModelInfo(req.body);
+
     // Helper function that contains the common conversation operations
     async function performAddMessageStream(
       session?: ClientSession | null,
@@ -4925,6 +5388,19 @@ export const addMessageStreamToAgentConversation =
       conversation.status = CONVERSATION_STATUS.INPROGRESS as any;
       conversation.failReason = undefined; // Clear previous error if any
 
+      const fieldsToUpdate: Array<keyof IAIModel> = [
+        'modelKey',
+        'modelName',
+        'modelProvider',
+        'chatMode',
+      ];
+      for (const field of fieldsToUpdate) {
+        const value = req.body[field];
+        if (value !== undefined && value !== null) {
+          (conversation.modelInfo as IAIModel)[field] = value;
+        }
+      }
+
       // First, add the user message to the existing conversation
       conversation.messages.push(
         buildUserQueryMessage(req.body.query) as IMessageDocument,
@@ -4934,7 +5410,7 @@ export const addMessageStreamToAgentConversation =
       // Save the user message to the existing conversation first
       const savedConversation = session
         ? await conversation.save({ session })
-        : await conversation.save() as IAgentConversationDocument;
+        : ((await conversation.save()) as IAgentConversationDocument);
 
       if (!savedConversation) {
         throw new InternalServerError(
@@ -5006,7 +5482,7 @@ export const addMessageStreamToAgentConversation =
         // New fields for multi-model support
         modelKey: req.body.modelKey || null,
         modelName: req.body.modelName || null,
-        chatMode: req.body.chatMode || 'standard',
+        chatMode: req.body.chatMode || 'quick',
       };
 
       const aiCommandOptions: AICommandOptions = {
@@ -5019,8 +5495,11 @@ export const addMessageStreamToAgentConversation =
         body: aiPayload,
       };
 
-      const aiServiceCommand = new AIServiceCommand(aiCommandOptions);
-      const stream = await aiServiceCommand.executeStream();
+      const stream = await startAIStream(
+        aiCommandOptions,
+        'Add Message Agent Stream',
+        { requestId, agentKey },
+      );
 
       if (!stream) {
         throw new Error('Failed to get stream from AI service');
@@ -5136,17 +5615,18 @@ export const addMessageStreamToAgentConversation =
               const aiResponseMessage = buildAIResponseMessage(
                 { statusCode: 200, data: completeData },
                 savedCitations,
+                modelInfo,
               ) as IMessageDocument;
 
               // Add the AI message to the existing conversation
               existingConversation.messages.push(aiResponseMessage);
               existingConversation.lastActivityAt = Date.now();
-              existingConversation.status = CONVERSATION_STATUS.COMPLETE as any   ;
+              existingConversation.status = CONVERSATION_STATUS.COMPLETE as any;
 
               // Save the updated conversation with AI response
               const updatedConversation = session
                 ? await existingConversation.save({ session })
-                : await existingConversation.save() as IAgentConversationDocument;
+                : ((await existingConversation.save()) as IAgentConversationDocument);
 
               if (!updatedConversation) {
                 throw new InternalServerError(
@@ -5245,7 +5725,7 @@ export const addMessageStreamToAgentConversation =
 
               const savedWithError = session
                 ? await existingConversation.save({ session })
-                : await existingConversation.save() as IAgentConversationDocument;
+                : ((await existingConversation.save()) as IAgentConversationDocument);
 
               if (!savedWithError) {
                 logger.error('Failed to save conversation error state', {
@@ -5343,8 +5823,9 @@ export const addMessageStreamToAgentConversation =
               'Failed to save conversation general error status in catch block',
               {
                 requestId,
-                conversationId: (existingConversation as IAgentConversationDocument)
-                  ._id,
+                conversationId: (
+                  existingConversation as IAgentConversationDocument
+                )._id,
               },
             );
           }
@@ -5375,6 +5856,28 @@ export const addMessageStreamToAgentConversation =
     }
   };
 
+export const regenerateAgentAnswers =
+  (appConfig: AppConfig) =>
+  async (req: AuthenticatedUserRequest, res: Response) => {
+    await regenerateAnswersInternal(appConfig, req, res, {
+      conversationModel: AgentConversation,
+      buildQueryFilter: (conversationId, orgId, userId, agentKey) => ({
+        _id: conversationId,
+        agentKey,
+        orgId,
+        userId,
+        isDeleted: false,
+        $or: [
+          { initiator: userId },
+          { 'sharedWith.userId': userId },
+          { isShared: true },
+        ],
+      }),
+      buildAIEndpoint: (appConfig, agentKey) =>
+        `${appConfig.aiBackend}/api/v1/agent/${agentKey}/chat/stream`,
+    });
+  };
+
 export const getAllAgentConversations = async (
   req: AuthenticatedUserRequest,
   res: Response,
@@ -5396,11 +5899,21 @@ export const getAllAgentConversations = async (
     });
 
     const { skip, limit, page } = getPaginationParams(req);
-    const filter = buildAgentConversationFilter(req, orgId, userId, agentKey as string, conversationId as string);
+    const filter = buildAgentConversationFilter(
+      req,
+      orgId,
+      userId,
+      agentKey as string,
+      conversationId as string,
+    );
     const sortOptions = buildSortOptions(req);
 
     // sharedWith Me Conversation
-    const sharedWithMeFilter = buildAgentSharedWithMeFilter(req, userId, agentKey as string);
+    const sharedWithMeFilter = buildAgentSharedWithMeFilter(
+      req,
+      userId,
+      agentKey as string,
+    );
 
     // Execute query
     const [conversations, totalCount, sharedWithMeConversations] =
@@ -5502,7 +6015,13 @@ export const getAgentConversationById = async (
     const { page, limit } = getPaginationParams(req);
 
     // Build the base filter with access control
-    const baseFilter = buildAgentConversationFilter(req, orgId, userId, agentKey as string, conversationId as string);
+    const baseFilter = buildAgentConversationFilter(
+      req,
+      orgId,
+      userId,
+      agentKey as string,
+      conversationId as string,
+    );
 
     // Build message filter
     const messageFilter = buildMessageFilter(req);
@@ -5539,6 +6058,7 @@ export const getAgentConversationById = async (
         sharedWith: 1,
         status: 1,
         failReason: 1,
+        modelInfo: 1,
       })
       .populate({
         path: 'messages.citations.citationId',
@@ -5610,7 +6130,6 @@ export const getAgentConversationById = async (
   }
 };
 
-
 export const deleteAgentConversationById = async (
   req: AuthenticatedUserRequest,
   res: Response,
@@ -5623,7 +6142,12 @@ export const deleteAgentConversationById = async (
     const userId = req.user?.userId;
     const orgId = req.user?.orgId;
 
-    const conversation = await deleteAgentConversation(conversationId as string, agentKey as string, userId as string, orgId as string);
+    const conversation = await deleteAgentConversation(
+      conversationId as string,
+      agentKey as string,
+      userId as string,
+      orgId as string,
+    );
 
     res.status(200).json({
       message: 'Conversation deleted successfully',
@@ -5641,14 +6165,11 @@ export const deleteAgentConversationById = async (
   }
 };
 
-export const getAvailableTools = (appConfig: AppConfig) => async (
-  req: AuthenticatedUserRequest,
-  res: Response,
-  next: NextFunction,
-) => {
+export const getAvailableTools =
+  (appConfig: AppConfig) =>
+  async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
   const requestId = req.context?.requestId;
   try {
-
     const aiCommandOptions: AICommandOptions = {
       uri: `${appConfig.aiBackend}/api/v1/tools/`,
       method: HttpMethod.GET,
@@ -5660,7 +6181,7 @@ export const getAvailableTools = (appConfig: AppConfig) => async (
     const aiCommand = new AIServiceCommand(aiCommandOptions);
     const aiResponse = await aiCommand.execute();
     if (aiResponse && aiResponse.statusCode !== 200) {
-      throw new BadRequestError('Failed to get available tools');
+      throw handleBackendError(aiResponse.data, 'Get Available Tools');
     }
     const tools = aiResponse.data;
     res.status(HTTP_STATUS.OK).json(tools);
@@ -5670,11 +6191,14 @@ export const getAvailableTools = (appConfig: AppConfig) => async (
       message: 'Error getting available tools',
       error: error.message,
     });
-    next(error);
+    const backendError = handleBackendError(error, 'Get Available Tools');
+    next(backendError);
   }
 };
 
-export const getAgentPermissions = (appConfig: AppConfig) => async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
+export const getAgentPermissions =
+  (appConfig: AppConfig) =>
+  async (req: AuthenticatedUserRequest, res: Response, next: NextFunction) => {
   const requestId = req.context?.requestId;
   const { agentKey } = req.params;
 
@@ -5690,7 +6214,7 @@ export const getAgentPermissions = (appConfig: AppConfig) => async (req: Authent
     const aiCommand = new AIServiceCommand(aiCommandOptions);
     const aiResponse = await aiCommand.execute();
     if (aiResponse && aiResponse.statusCode !== 200) {
-      throw new BadRequestError('Failed to get agent permissions');
+      throw handleBackendError(aiResponse.data, 'Get Agent Permissions');
     }
     const permissions = aiResponse.data;
     res.status(200).json(permissions);    
@@ -5700,6 +6224,7 @@ export const getAgentPermissions = (appConfig: AppConfig) => async (req: Authent
       message: 'Error getting agent permissions',
       error: error.message,
     });
-    next(error);
+    const backendError = handleBackendError(error, 'Get Agent Permissions');
+    next(backendError);
   }
 };  

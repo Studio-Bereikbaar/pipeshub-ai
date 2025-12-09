@@ -182,6 +182,22 @@ export const qdrantConfigSchema = z.object({
   }),
 });
 
+// Platform settings schema (feature flags and upload limits)
+export const platformSettingsSchema = z.object({
+  body: z.object({
+    fileUploadMaxSizeBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(1024 * 1024 * 1024, { message: 'Max 1GB per file' }) // safety upper bound
+      .describe('Max per-file upload size in bytes'),
+    featureFlags: z
+      .record(z.boolean())
+      .default({})
+      .describe('Feature flags map, e.g., { ENABLE_WORKFLOW_BUILDER: true }'),
+  }),
+});
+
 export const kafkaConfigSchema = z.object({
   body: z.object({
     brokers: z.array(z.string().url()), // Ensures an array of valid URLs
@@ -384,6 +400,7 @@ export const modelType = z.enum([
 export const embeddingProvider = z.enum([
   'anthropic',
   'bedrock',
+  'azureAI',
   'azureOpenAI', 
   'cohere',
   'default',
@@ -403,7 +420,8 @@ export const embeddingProvider = z.enum([
 
 export const llmProvider = z.enum([
   'anthropic',
-  'bedrock', 
+  'bedrock',
+  'azureAI',
   'azureOpenAI',
   'cohere',
   'fireworks',
@@ -418,8 +436,13 @@ export const llmProvider = z.enum([
   'xai'
 ]);
 
-// Combined provider type that accepts both embedding and LLM providers
-export const providerType = z.union([embeddingProvider, llmProvider]);
+export const ocrProvider = z.enum([
+  'azureDI',
+  'ocrmypdf'
+]);
+
+// Combined provider type that accepts embedding, LLM, and OCR providers
+export const providerType = z.union([embeddingProvider, llmProvider, ocrProvider]);
 
 // Model Configuration schema
 export const configurationSchema = z.object({
@@ -442,7 +465,9 @@ export const modelConfigurationSchema = z.object({
   provider: providerType,
   configuration: configurationSchema,
   isMultimodal: z.boolean().default(false).describe("Whether the model supports multimodal input"),
-  isDefault: z.boolean().default(false).describe("Whether this should be the default model")
+  isReasoning: z.boolean().default(false).describe("Whether the model supports reasoning"),
+  isDefault: z.boolean().default(false).describe("Whether this should be the default model"),
+  contextLength: z.number().optional().nullable().describe("Context length for the model")
 });
 
 export const updateProviderRequestSchema = z.object({
@@ -454,7 +479,9 @@ export const updateProviderRequestSchema = z.object({
     provider: providerType,
     configuration: configurationSchema,
     isMultimodal: z.boolean().default(false).describe("Whether the model supports multimodal input"),
-    isDefault: z.boolean().default(false).describe("Whether this should be the default model")
+    isReasoning: z.boolean().default(false).describe("Whether the model supports reasoning"),
+    isDefault: z.boolean().default(false).describe("Whether this should be the default model"),
+    contextLength: z.number().optional().nullable().describe("Context length for the model")
   }),
 });
 
@@ -464,7 +491,9 @@ export const addProviderRequestSchema = z.object({
     provider: providerType,
     configuration: configurationSchema,
     isMultimodal: z.boolean().default(false).describe("Whether the model supports multimodal input"),
-    isDefault: z.boolean().default(false).describe("Whether this should be the default model")
+    isReasoning: z.boolean().default(false).describe("Whether the model supports reasoning"),
+    isDefault: z.boolean().default(false).describe("Whether this should be the default model"),
+    contextLength: z.number().optional().nullable().describe("Context length for the model")
   }),
 });
 

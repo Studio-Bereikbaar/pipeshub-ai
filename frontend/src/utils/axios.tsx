@@ -1,5 +1,4 @@
-import type {
-  ReactNode} from 'react';
+import type { ReactNode } from 'react';
 import type { AxiosRequestConfig } from 'axios';
 
 import axios from 'axios';
@@ -72,6 +71,8 @@ axiosInstance.interceptors.response.use(
       retry: false,
     };
 
+    // Remove noisy debug logs in production
+
     // Axios error with response from server
     if (axios.isAxiosError(error)) {
       // Connection or timeout errors (no response)
@@ -92,21 +93,58 @@ axiosInstance.interceptors.response.use(
         processedError.statusCode = error.response.status;
 
         // Set message and details from response if available
-        if (error.response.data) {
-          if (typeof error.response.data === 'string') {
-            processedError.message = error.response.data;
+        const data: any = error.response.data;
+        if (data) {
+          if (typeof data === 'string') {
+            processedError.message = data;
           } else {
-            // Check for error.metadata.detail first
-            if (error.response.data.error && error.response.data.error.metadata?.detail) {
-              processedError.message = error.response.data.error.metadata.detail;
+            // Prefer explicit message if present
+            if (typeof data.message === 'string' && data.message.trim()) {
+              processedError.message = data.message;
             }
-            // If not found, check for error.message
-            else if (error.response.data.error && error.response.data.error?.message) {
-              processedError.message = error.response.data.error.message;
+            // Validation/issue arrays (e.g., Zod)
+            const issues = data.issues || data.error?.issues || data.errors;
+            if (Array.isArray(issues) && issues.length > 0) {
+              const first = issues[0];
+              const issueMsg = (first?.message || first)?.toString?.() || '';
+              const path = first?.path ? (Array.isArray(first.path) ? first.path.join('.') : String(first.path)) : '';
+              const combined = path ? `${issueMsg} (${path})` : issueMsg;
+              if (combined) processedError.message = combined;
             }
-            // Store additional details if available
-            if (error.response.data.error) {
-              processedError.details = error.response.data.error;
+            // Validation errors from our middleware: error.metadata.errors
+            const metaErrors = data.error?.metadata?.errors;
+            if (Array.isArray(metaErrors) && metaErrors.length > 0) {
+              const first = metaErrors[0];
+              const msg = first?.message || '';
+              if (msg) processedError.message = msg;
+              processedError.details = {
+                ...(processedError.details || {}),
+                validationErrors: metaErrors,
+              };
+            }
+            // error.metadata.detail from our backend
+            if (data.error?.metadata?.detail) {
+              processedError.message = data.error.metadata.detail;
+            }
+            // error.message fallback
+            if (!processedError.message && data.error?.message) {
+              processedError.message = data.error.message;
+            }
+            // If backend provides an error.code, set retry false and keep code for consumers
+            if (data.error?.code && typeof data.error.code === 'string') {
+              processedError.details = { ...(processedError.details || {}), code: data.error.code };
+              processedError.retry = false;
+            }
+            // details/reason fallbacks
+            if (!processedError.message && typeof data.details === 'string') {
+              processedError.message = data.details;
+            }
+            if (!processedError.message && typeof data.reason === 'string') {
+              processedError.message = data.reason;
+            }
+            // Store details object if present
+            if (data.error && typeof data.error === 'object') {
+              processedError.details = data.error;
             }
           }
         }
@@ -136,10 +174,11 @@ axiosInstance.interceptors.response.use(
     else if (error instanceof Error) {
       processedError.message = error.message;
     }
+    
 
     // Try to show error in snackbar if ErrorContext is available
     try {
-      const errorContext = (window as any).__errorContext;
+      const errorContext = window.__errorContext;
       if (errorContext && errorContext.showError) {
         errorContext.showError(processedError.message);
       }
@@ -172,9 +211,9 @@ export const ErrorProvider: React.FC<ErrorProviderProps> = ({ children }) => {
 
   // Make error handler available globally
   useEffect(() => {
-    (window as any).__errorContext = contextValue;
+    window.__errorContext = contextValue;
     return () => {
-      delete (window as any).__errorContext;
+      delete window.__errorContext;
     };
   }, [contextValue]);
 

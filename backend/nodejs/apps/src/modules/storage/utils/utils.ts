@@ -12,8 +12,8 @@ import { Document, StorageVendor } from '../types/storage.service.types';
 import { HTTP_STATUS } from '../../../libs/enums/http-status.enum';
 import { ErrorMetadata } from '../../../libs/errors/base.error';
 import { createReadStream } from 'fs';
+import fs from 'fs';
 import { StorageServiceAdapter } from '../adapter/base-storage.adapter';
-import { access } from 'fs';
 import {
   AuthenticatedServiceRequest,
   AuthenticatedUserRequest,
@@ -26,6 +26,14 @@ const logger = Logger.getInstance({
 // Interface for document storage info response
 export interface DocumentInfoResponse {
   document: mongoose.Document<unknown, {}, DocumentModel> & DocumentModel;
+}
+
+export function encodeRFC5987(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A');
 }
 
 async function getDocumentInfoFromDb(
@@ -138,11 +146,45 @@ export function hasExtension(documentName: string | undefined): boolean {
   return mimeType !== '';
 }
 
+/**
+ * Validates file extension, MIME type, and document name constraints
+ * @param extension - File extension (without leading dot)
+ * @param documentName - Document name to validate (should not contain extension or forward slash)
+ * @param fileNameForError - File name to use in error messages
+ * @throws BadRequestError if validation fails
+ */
+export function validateFileAndDocumentName(
+  extension: string,
+  documentName: string | undefined,
+  fileNameForError: string,
+): void {
+  // Validate MIME type support FIRST - most important check
+  const mimeType = getMimeType(extension);
+  if (mimeType === '') {
+    throw new BadRequestError(
+      `File "${fileNameForError}" has an unsupported file extension "${extension}". Supported file types include: .pdf, .docx, .xlsx, .csv, .md, .txt, .pptx, images, videos, and more.`,
+    );
+  }
+
+  if (hasExtension(documentName)) {
+    throw new BadRequestError(
+      `File "${fileNameForError}": The document name cannot contain a file extension. Please provide only the name without the extension.`,
+    );
+  }
+
+  if (documentName?.includes('/')) {
+    throw new BadRequestError(
+      `File "${fileNameForError}": The document name cannot contain a forward slash.`,
+    );
+  }
+}
+
 export async function createPlaceholderDocument(
   req: AuthenticatedUserRequest | AuthenticatedServiceRequest,
   next: NextFunction,
   size: number,
-  extension : string,
+  extension: string,
+  originalname?: string,
 ): Promise<DocumentInfoResponse | undefined> {
   try {
     const {
@@ -155,17 +197,12 @@ export async function createPlaceholderDocument(
     } = req.body as Partial<Document>;
     const orgId = extractOrgId(req);
     const userId = extractUserId(req);
-    if (hasExtension(documentName)) {
-      throw new BadRequestError(
-        'The name of the document cannot have extensions',
-      );
-    }
 
-    if (documentName?.includes('/')) {
-      throw new BadRequestError(
-        'The name of the document cannot have forward slash',
-      );
-    }
+    // Use originalname or documentName for error messages
+    const fileNameForError = originalname || documentName || 'the file';
+
+    // Validate file extension, MIME type, and document name constraints
+    validateFileAndDocumentName(extension, documentName, fileNameForError);
 
     const documentInfo: Partial<Document> = {
       documentName,
@@ -178,7 +215,7 @@ export async function createPlaceholderDocument(
       customMetadata,
       sizeInBytes: size,
       storageVendor: StorageVendor.S3,
-      extension
+      extension,
     };
 
     const savedDocument = await DocumentModel.create(documentInfo);
@@ -249,38 +286,77 @@ export function serveFileFromLocalStorage(document: Document, res: Response) {
       throw new NotFoundError('Local file path not found');
     }
 
-    // Parse the file:// URL to get the actual filesystem path
-    const urlObj = new URL(localFilePath);
-    const fsPath = decodeURIComponent(urlObj.pathname);
+    // DON'T use new URL() - it treats # as a fragment identifier!
+    // Instead, manually parse the file:// URL
 
-    // Handle Windows paths by removing leading slash if needed
-    const filePath =
-      process.platform === 'win32' ? fsPath.replace(/^\//, '') : fsPath;
+    let filePath: string;
 
-    // Check if file exists
-    access(filePath, (err: any) => {
-      if (err) {
-        throw new NotFoundError('File not found');
+    if (localFilePath.startsWith('file://')) {
+      // Remove the file:// protocol
+      let pathPart = localFilePath.substring(7); // Remove 'file://'
+
+      if (process.platform === 'win32') {
+        // Windows: file:///C:/path/to/file
+        // Remove leading / if present (file:/// becomes /C:/...)
+        if (pathPart.startsWith('/')) {
+          pathPart = pathPart.substring(1);
+        }
+        // Decode URI components and convert forward slashes to backslashes
+        filePath = decodeURIComponent(pathPart).replace(/\//g, '\\');
+      } else {
+        // Unix: file:///path/to/file or file://path/to/file
+        // Remove leading / if we have // (file:// case)
+        if (pathPart.startsWith('//')) {
+          pathPart = pathPart.substring(1);
+        }
+        filePath = decodeURIComponent(pathPart);
       }
-    });
+    } else {
+      // If it's not a file:// URL, treat it as a direct path
+      filePath = localFilePath;
+    }
 
-    // convert the document.mimeType to a valid mime type
+    // Check if file exists using synchronous access
+    try {
+      fs.accessSync(filePath, fs.constants.R_OK);
+    } catch (err) {
+      logger.error('File not accessible:', {
+        filePath,
+        originalPath: localFilePath,
+        documentName: document.documentName,
+        extension: document.extension,
+        error: err,
+      });
+      throw new NotFoundError(
+        `File not found or not accessible: ${document.documentName}${document.extension}`,
+      );
+    }
+
+    // Get mime type from extension
     const mimeType = getMimeType(document.extension);
-    // Set appropriate headers
+
+    // Encode filename for Content-Disposition header
+    const fullName = `${document.documentName}${document.extension}`;
+    const filenameStar = encodeRFC5987(fullName);
+
+    // Set headers
     res.setHeader('Content-Type', mimeType || 'application/octet-stream');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${document.documentName}${document.extension}"`,
+      `attachment; filename*=UTF-8''${filenameStar}`,
     );
 
-    // Stream the file directly to the response
+    // Stream the file
     const fileStream = createReadStream(filePath);
     fileStream.pipe(res);
 
-    // Handle potential errors during streaming
+    // Handle streaming errors
     fileStream.on('error', (error) => {
-      logger.error('Error streaming file:', error);
-      // Only send error if headers haven't been sent yet
+      logger.error('Error streaming file:', {
+        filePath,
+        documentName: document.documentName,
+        error,
+      });
       if (!res.headersSent) {
         res
           .status(HTTP_STATUS.INTERNAL_SERVER)

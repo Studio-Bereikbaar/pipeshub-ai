@@ -177,15 +177,9 @@ const AgentChatInput: React.FC<ChatInputProps> = ({
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
 
-  // Set defaults for model and chat mode
-  useEffect(() => {
-    if (!selectedChatMode && CHAT_MODES.length > 0) {
-      onChatModeChange(CHAT_MODES[0]);
-    }
-    if (!selectedModel && availableModels.length > 0) {
-      onModelChange(availableModels[0]);
-    }
-  }, [selectedChatMode, onChatModeChange, selectedModel, availableModels, onModelChange]);
+  // Note: Model and chat mode defaults are handled by the parent component (agent-chat.tsx)
+  // The parent will set the model from conversation if available, or set defaults if not
+  // This component just respects what's passed to it via props
 
   // Initialize selections from agent defaults (only once)
   useEffect(() => {
@@ -516,7 +510,6 @@ const AgentChatInput: React.FC<ChatInputProps> = ({
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
                 value={localValue}
-                disabled={isInputDisabled}
                 style={{
                   width: '100%',
                   border: 'none',
@@ -531,7 +524,6 @@ const AgentChatInput: React.FC<ChatInputProps> = ({
                   fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
                   overflowY: 'auto',
                   cursor: 'text',
-                  opacity: isInputDisabled ? 0.6 : 1,
                 }}
               />
             </Box>

@@ -66,9 +66,29 @@ interface SyncCustomField extends BaseField {
     | 'JSON';
 }
 
+// Filter value types
+export type FilterOperator = string;
+export type FilterValue = string | number | boolean | string[] | DatetimeRange | EpochDatetimeRange | null;
+
+export interface DatetimeRange {
+  start: string | number;
+  end: string | number;
+}
+
+export interface EpochDatetimeRange {
+  start: number | null;
+  end: number | null;
+}
+
+export interface FilterValueData {
+  operator: FilterOperator;
+  value: FilterValue;
+  type?: 'list' | 'datetime' | 'text' | 'string' | 'number' | 'boolean' | 'multiselect' | 'tags' | 'daterange' | 'datetimerange';
+}
+
 // Filter schema field
 interface FilterSchemaField extends BaseField {
-  fieldType:
+  fieldType?:
     | 'TEXT'
     | 'SELECT'
     | 'MULTISELECT'
@@ -77,18 +97,10 @@ interface FilterSchemaField extends BaseField {
     | 'NUMBER'
     | 'BOOLEAN'
     | 'TAGS';
-  operators?: (
-    | 'EQUALS'
-    | 'NOT_EQUALS'
-    | 'CONTAINS'
-    | 'NOT_CONTAINS'
-    | 'STARTS_WITH'
-    | 'ENDS_WITH'
-    | 'GREATER_THAN'
-    | 'LESS_THAN'
-    | 'IN'
-    | 'NOT_IN'
-  )[];
+  filterType?: 'list' | 'datetime' | 'text' | 'string' | 'number' | 'boolean' | 'multiselect';
+  category?: 'sync' | 'indexing';
+  defaultOperator?: string;
+  operators?: string[];
 }
 
 // Filter custom field
@@ -110,7 +122,7 @@ interface FilterCustomField extends BaseField {
 interface DocumentationLink {
   title: string;
   url: string;
-  type: 'setup' | 'api' | 'connector';
+  type: 'setup' | 'api' | 'connector' | 'pipeshub';
 }
 
 // Conditional display rule interface
@@ -187,8 +199,20 @@ interface ConnectorSyncConfig {
   values?: Record<string, any>;
 }
 
+// Filter category configuration (sync/indexing)
+interface FilterCategoryConfig {
+  schema?: {
+    fields: FilterSchemaField[];
+  };
+  values?: Record<string, any>;
+  customFields?: FilterCustomField[];
+  customValues?: Record<string, any>;
+}
+
 // Filters configuration interface
 interface ConnectorFiltersConfig {
+  sync?: FilterCategoryConfig;
+  indexing?: FilterCategoryConfig;
   schema?: {
     fields: FilterSchemaField[];
   };
@@ -243,6 +267,7 @@ export type {
   ConnectorAuthConfig,
   ConnectorSyncConfig,
   ConnectorFiltersConfig,
+  FilterCategoryConfig,
   ScheduledConfig,
   WebhookConfig,
   RealtimeConfig,

@@ -3,7 +3,9 @@ from uuid import uuid4
 
 from app.config.constants.arangodb import AccountType, CollectionNames, Connectors
 from app.connectors.core.base.event_service.event_service import BaseEventService
-from app.connectors.sources.google.common.arango_service import ArangoService
+from app.connectors.services.base_arango_service import (
+    BaseArangoService as ArangoService,
+)
 from app.containers.connector import (
     ConnectorAppContainer,
     initialize_enterprise_google_account_services_fn,
@@ -184,16 +186,16 @@ class EntityEventService(BaseEventService):
         try:
             self.logger.info(f"📥 Processing user added event: {payload}")
             # Check if user already exists by email
-            existing_user = await self.arango_service.get_entity_id_by_email(
+            existing_user = await self.arango_service.get_user_by_email(
                 payload["email"]
             )
 
             current_timestamp = get_epoch_timestamp_in_ms()
 
             if existing_user:
-                user_key = existing_user
+                user_key = existing_user.id
                 user_data = {
-                    "_key": existing_user,
+                    "_key": user_key,
                     "userId": payload["userId"],
                     "orgId": payload["orgId"],
                     "isActive": True,
@@ -360,12 +362,12 @@ class EntityEventService(BaseEventService):
             self.logger.error(f"❌ Error deleting user: {str(e)}")
             return False
 
-    async def __handle_google_app_account_services(self, org_id: str, account_type: str) -> bool:
+    async def __handle_google_app_account_services(self, org_id: str, account_type: str, app_names: list[str]) -> bool:
         """Handle Google account services"""
         if account_type == AccountType.ENTERPRISE.value or account_type == AccountType.BUSINESS.value:
-            await initialize_enterprise_google_account_services_fn(org_id, self.app_container)
+            await initialize_enterprise_google_account_services_fn(org_id, self.app_container, app_names)
         elif account_type == AccountType.INDIVIDUAL.value:
-            await initialize_individual_google_account_services_fn(org_id, self.app_container)
+            await initialize_individual_google_account_services_fn(org_id, self.app_container, app_names)
         else:
             self.logger.error("Account Type not valid")
             return False
@@ -397,7 +399,7 @@ class EntityEventService(BaseEventService):
                 if self.app_container and "google" in app_group.lower():
                     accountType = org["accountType"]
                     # Use the existing app container to initialize services
-                    await self.__handle_google_app_account_services(org_id, accountType)
+                    await self.__handle_google_app_account_services(org_id, accountType, enabled_apps)
                     self.logger.info(
                         f"✅ Successfully initialized services for account type: {org['accountType']}"
                     )
@@ -622,7 +624,7 @@ class EntityEventService(BaseEventService):
             # TODO: Use transaction instead of batch upsert
             await self.arango_service.batch_upsert_nodes([kb_data], CollectionNames.RECORD_GROUPS.value)
             await self.arango_service.batch_upsert_nodes([root_folder_data], CollectionNames.FILES.value)
-            await self.arango_service.batch_create_edges([permission_edge], CollectionNames.PERMISSIONS_TO_KB.value)
+            await self.arango_service.batch_create_edges([permission_edge], CollectionNames.PERMISSION.value)
             await self.arango_service.batch_create_edges([folder_edge], CollectionNames.BELONGS_TO.value)
 
             self.logger.info(f"Created new knowledge base for user {userId} in organization {orgId}")

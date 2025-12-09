@@ -108,10 +108,11 @@ class ConfigurationService:
             # Redis configuration fallback
             redis_host = os.getenv("REDIS_HOST")
             if redis_host:
+                redis_password = os.getenv("REDIS_PASSWORD", "")
                 return {
                     "host": redis_host,
                     "port": int(os.getenv("REDIS_PORT", "6379")),
-                    "password": os.getenv("REDIS_PASSWORD", "")
+                    "password": redis_password if redis_password and redis_password.strip() else None
                 }
         elif key == config_node_constants.QDRANT.value:
             # Qdrant configuration fallback
@@ -128,15 +129,18 @@ class ConfigurationService:
         """Start watching etcd changes in a background thread"""
 
         def watch_etcd() -> None:
-            # Check if the store has a client attribute (for ETCD stores)
+            # Expect store implementations to expose .client directly
             if hasattr(self.store, 'client'):
-                while self.store.client is None:
-                    self.logger.debug("🔄 Waiting for ETCD client to be initialized...")
+                # Wait for client to be ready
+                while getattr(self.store, 'client', None) is None:
                     time.sleep(3)
-                self.store.client.add_watch_prefix_callback("/", self._watch_callback)
+                try:
+                    self.store.client.add_watch_prefix_callback("/", self._watch_callback)
+                    self.logger.debug("👀 ETCD prefix watch registered for cache invalidation")
+                except Exception as e:
+                    self.logger.error("❌ Failed to register ETCD watch: %s", str(e))
             else:
-                # For in-memory stores, we don't need to watch for external changes
-                self.logger.debug("📋 Store doesn't have client attribute, skipping watch setup")
+                self.logger.debug("📋 Store doesn't expose an ETCD client; skipping watch setup")
 
         self.watch_thread = threading.Thread(target=watch_etcd, daemon=True)
         self.watch_thread.start()
@@ -221,6 +225,5 @@ class ConfigurationService:
             for evt in event.events:
                 key = evt.key.decode()
                 self.cache.pop(key, None)
-                self.logger.debug("🔄 Cache updated for key: %s", key)
         except Exception as e:
             self.logger.error("❌ Error in watch callback: %s", str(e))

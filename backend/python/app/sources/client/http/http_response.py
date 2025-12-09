@@ -1,23 +1,20 @@
-import json
 from typing import Any, Dict
 
-from aiohttp import ClientResponse  # type: ignore
+import httpx  # type: ignore
 
 
 class HTTPResponse:
-    """HTTP response
+    """HTTP response wrapper for httpx.Response
     Args:
-        data: The data of the response
-        response: The response object
+        response: The httpx response object
     """
-    def __init__(self, data: bytes, response: ClientResponse) -> None:
-        self.data = data
+    def __init__(self, response: httpx.Response) -> None:
         self.response = response
 
     @property
     def status(self) -> int:
         """Get the status code of the response"""
-        return self.response.status
+        return self.response.status_code
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -32,7 +29,7 @@ class HTTPResponse:
     @property
     def content_type(self) -> str:
         """Get the content type of the response"""
-        return self.response.content_type
+        return self.response.headers.get("content-type", "").split(";")[0].strip()
 
     @property
     def is_json(self) -> bool:
@@ -46,13 +43,16 @@ class HTTPResponse:
 
     def json(self) -> dict[str, Any]:
         """Parse data as JSON"""
-        return json.loads(self.text())
+        return self.response.json()
 
     def text(self) -> str:
         """Get data as text string"""
-        encoding = self.response.charset or 'utf-8'
-        return self.data.decode(encoding, errors='replace')
+        return self.response.text
 
     def bytes(self) -> bytes:
         """Get raw bytes data"""
-        return self.data
+        return self.response.content
+
+    def raise_for_status(self) -> None:
+        """Raise an exception if the response status indicates an error"""
+        self.response.raise_for_status()

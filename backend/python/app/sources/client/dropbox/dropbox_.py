@@ -12,7 +12,6 @@ except ImportError:
     raise ImportError("dropbox is not installed. Please install it with `pip install dropbox`")
 
 from app.config.configuration_service import ConfigurationService
-from app.services.graph_db.interface.graph_db import IGraphService
 from app.sources.client.http.http_client import HTTPClient
 from app.sources.client.iclient import IClient
 
@@ -34,8 +33,19 @@ class DropboxResponse:
 
 class DropboxRESTClientViaToken:
     """Dropbox client via short/long‑lived OAuth2 access token."""
-    def __init__(self, access_token: str, timeout: Optional[float] = None, is_team: bool = False) -> None:
+    def __init__(
+        self,
+        access_token: str,
+        refresh_token: Optional[str] = None,
+        app_key: Optional[str] = None,
+        app_secret: Optional[str] = None,
+        timeout: Optional[float] = None,
+        is_team: bool = False
+    ) -> None:
         self.access_token = access_token
+        self.refresh_token = refresh_token
+        self.app_key = app_key
+        self.app_secret = app_secret
         self.timeout = timeout
         self.is_team = is_team
         self.dropbox_client = None
@@ -43,9 +53,21 @@ class DropboxRESTClientViaToken:
     def create_client(self) -> Dropbox: # type: ignore[valid-type]
         # `timeout` is supported by SDK constructor
         if self.is_team:
-            self.dropbox_client = DropboxTeam(oauth2_access_token=self.access_token, timeout=self.timeout) # type: ignore[valid-type]
+            self.dropbox_client = DropboxTeam(
+                oauth2_access_token=self.access_token,
+                timeout=self.timeout,
+                oauth2_refresh_token=self.refresh_token,
+                app_key=self.app_key,
+                app_secret=self.app_secret
+            ) # type: ignore[valid-type]
         else:
-            self.dropbox_client = Dropbox(oauth2_access_token=self.access_token, timeout=self.timeout) # type: ignore[valid-type]
+            self.dropbox_client = Dropbox(
+                oauth2_access_token=self.access_token,
+                timeout=self.timeout,
+                oauth2_refresh_token=self.refresh_token,
+                app_key=self.app_key,
+                app_secret=self.app_secret
+            ) # type: ignore[valid-type]
         return self.dropbox_client
 
     def get_dropbox_client(self) -> Dropbox: # type: ignore[valid-type]
@@ -109,13 +131,23 @@ class DropboxTokenConfig:
         ssl: Unused; kept for interface parity
     """
     token: str
+    refresh_token: Optional[str] = None
+    app_key: Optional[str] = None
+    app_secret: Optional[str] = None
     timeout: Optional[float] = None
     base_url: str = "https://api.dropboxapi.com"   # not used by SDK, for parity only
     ssl: bool = True
 
     async def create_client(self, is_team: bool = False) -> DropboxRESTClientViaToken:
         """Create a Dropbox client."""
-        return DropboxRESTClientViaToken(self.token, timeout=self.timeout, is_team=is_team)
+        return DropboxRESTClientViaToken(
+            self.token,
+            self.refresh_token,
+            app_key=self.app_key,
+            app_secret=self.app_secret,
+            timeout=self.timeout,
+            is_team=is_team
+        )
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -199,12 +231,67 @@ class DropboxClient(IClient):
     @classmethod
     async def build_from_services(
         cls,
-        logger : logging.Logger,
+        logger: logging.Logger,
         config_service: ConfigurationService,
-        arango_service: IGraphService,
-        is_team: bool = False,
     ) -> "DropboxClient":
         """
-        Build DropboxClient using your configuration service & org/user context.
+        Build DropboxClient using configuration service
+        Args:
+            logger: Logger instance
+            config_service: Configuration service instance
+        Returns:
+            DropboxClient instance
         """
-        ...
+        try:
+            # Get Dropbox configuration from the configuration service
+            config = await cls._get_connector_config(logger, config_service)
+
+            if not config:
+                raise ValueError("Failed to get Dropbox connector configuration")
+
+            # Extract configuration values
+            auth_type = config.get("authType", "APP_KEY_SECRET")  # APP_KEY_SECRET or OAUTH
+            auth_config = config.get("auth", {})
+
+            # Create appropriate client based on auth type
+            if auth_type == "APP_KEY_SECRET":
+                app_key = auth_config.get("appKey", "")
+                app_secret = auth_config.get("appSecret", "")
+                timeout = auth_config.get("timeout", None)
+                is_team = auth_config.get("isTeam", False)
+                if not app_key or not app_secret:
+                    raise ValueError("App key and app secret required for app_key_secret auth type")
+
+                app_config = DropboxAppKeySecretConfig(
+                    app_key=app_key,
+                    app_secret=app_secret,
+                    timeout=timeout
+                )
+                client = await app_config.create_client(is_team=is_team)
+
+            elif auth_type == "OAUTH":
+                credentials_config = auth_config.get("credentials", {})
+                is_team = credentials_config.get("isTeam", False)
+                access_token = credentials_config.get("accessToken", "")
+                if not access_token:
+                    raise ValueError("Access token required for oauth auth type")
+                client = await DropboxTokenConfig(token=access_token).create_client(is_team=is_team)
+
+            else:
+                raise ValueError(f"Unsupported auth type: {auth_type}")
+
+            return cls(client)
+
+        except Exception as e:
+            logger.error(f"Failed to build Dropbox client from services: {str(e)}")
+            raise
+
+    @staticmethod
+    async def _get_connector_config(logger: logging.Logger, config_service: ConfigurationService) -> Dict[str, Any]:
+        """Fetch connector config from etcd for Dropbox."""
+        try:
+            config = await config_service.get_config("/services/connectors/dropbox/config")
+            return config or {}
+        except Exception as e:
+            logger.error(f"Failed to get Dropbox connector config: {e}")
+            return {}
