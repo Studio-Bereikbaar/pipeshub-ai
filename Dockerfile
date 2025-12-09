@@ -79,7 +79,7 @@ ENV VITE_IAM_URL=$VITE_IAM_URL
 RUN mkdir -p packages
 COPY frontend/package*.json ./
 COPY frontend/packages ./packages/
-RUN npm config set legacy-peer-deps true && npm install
+RUN npm config set legacy-peer-deps true && npm install --include=dev
 COPY frontend/ ./
 RUN npm run build
 
