@@ -47,14 +47,14 @@ RUN set -e; \
     if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
         echo "Detected ARM architecture (M1/Apple Silicon)"; \
         # ARM-specific handling: Skip problematic binary or use alternative
-        npm install --prefix ./ --ignore-scripts && \
+        npm install --prefix ./ --ignore-scripts --include=dev && \
 	npm uninstall jpeg-recompress-bin mozjpeg imagemin-mozjpeg 2>/dev/null || true; \
         # Install Sharp AS a better alternative for ARM64
         npm install sharp --save || echo "Sharp install failed, continuing without image optimization"; \
     else \
         echo "Detected x86 architecture"; \
         # Standard install for x86 platforms
-        apt-get update && apt-get install -y libc6-dev-i386 && npm install --prefix ./; \
+        apt-get update && apt-get install -y libc6-dev-i386 && npm install --prefix ./ --include=dev; \
     fi
 
 COPY backend/nodejs/apps/src ./src
