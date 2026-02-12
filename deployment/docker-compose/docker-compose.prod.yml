@@ -1,13 +1,13 @@
 services:
   pipeshub-ai:
-    image: pipeshubai/pipeshub-ai:${IMAGE_TAG:-latest}
+    image: pipeshubai/pipeshub-ai:latest
     container_name: pipeshub-ai
     restart: always
     ports:
       - "8091:8091"
       - "8088:8088"
       - "3000:3000"
-      - "8001:8000"
+      - "8002:8000"
       - "8081:8081"
     deploy:
       resources:
@@ -17,18 +17,18 @@ services:
     init: true
     environment:
       # Core environment settings
-      - NODE_ENV=${NODE_ENV:-production}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
-      - STRICT_MODE=${STRICT_MODE:-false}
-      - SKIP_DOMAIN_CHECK=${SKIP_DOMAIN_CHECK:-false}
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - ALLOWED_ORIGINS=
+      - STRICT_MODE=false
+      - SKIP_DOMAIN_CHECK=false
 
-      # Security settings - allow override with custom secret
-      - SECRET_KEY=${SECRET_KEY:-your_random_encryption_secret_key}
+      # Security settings
+      - SECRET_KEY=dad57c29acd76fbaa47351045c02128e0a5d150d7152668fffe1df576c953ca1
 
       # Public endpoints
-      - CONNECTOR_PUBLIC_BACKEND=${CONNECTOR_PUBLIC_BACKEND:-}
-      - FRONTEND_PUBLIC_URL=${FRONTEND_PUBLIC_URL:-}
+      - CONNECTOR_PUBLIC_BACKEND=https://wiki.studiobereikbaar.nl:8088
+      - FRONTEND_PUBLIC_URL=https://wiki.studiobereikbaar.nl
 
       # Internal service URLs
       - QUERY_BACKEND=http://localhost:8000
@@ -36,19 +36,18 @@ services:
       - INDEXING_BACKEND=http://localhost:8091
 
       # Key-Value Store Configuration
-      - KV_STORE_TYPE=${KV_STORE_TYPE:-etcd}
+      - KV_STORE_TYPE=etcd
 
       # ETCD config
       - ETCD_URL=http://etcd:2379
       - ETCD_HOST=etcd
-      - ETCD_TIMEOUT=${ETCD_TIMEOUT:-5000}
+      - ETCD_TIMEOUT=5000
 
       # ArangoDB config
       - ARANGO_URL=http://arango:8529
       - ARANGO_DB_NAME=es
       - ARANGO_USERNAME=root
-      - ARANGO_PASSWORD=${ARANGO_PASSWORD:-your_password}
-      # Ensure we use the same password as configured for the ArangoDB service
+      - ARANGO_PASSWORD=UxoR1H05HvlzesJIeo32sFLv
 
       # Kafka config
       - KAFKA_BROKERS=kafka-1:9092
@@ -56,18 +55,18 @@ services:
       # Redis config
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379
-      - REDIS_KV_PREFIX=${REDIS_KV_PREFIX:-pipeshub:kv:}
-      - REDIS_TIMEOUT=${REDIS_TIMEOUT:-10000}
-      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_PASSWORD=PpvDbMIryKqkHePYIyKTmPI0
+      - REDIS_URL=redis://:PpvDbMIryKqkHePYIyKTmPI0@redis:6379
+      - REDIS_KV_PREFIX=pipeshub:kv:
+      - REDIS_TIMEOUT=10000
+      - REDIS_DB=0
 
       # MongoDB config
-      - MONGO_URI=mongodb://${MONGO_USERNAME:-admin}:${MONGO_PASSWORD:-password}@mongodb:27017/?authSource=admin
+      - MONGO_URI=mongodb://admin:qNo4qOE6xcNvLKIwSCV7XlOl@mongodb:27017/?authSource=admin
       - MONGO_DB_NAME=es
 
       # Qdrant config
-      - QDRANT_API_KEY=${QDRANT_API_KEY:-your_qdrant_secret_api_key}
+      - QDRANT_API_KEY=2a51d8ddece9184c27eeab25539d0a36f45590a08f6a37ba
       - QDRANT_HOST=qdrant
       - QDRANT_GRPC_PORT=6334
       - QDRANT_PORT=6333
@@ -75,15 +74,15 @@ services:
       - OLLAMA_API_URL=http://host.docker.internal:11434
 
       # Rate limit config
-      - MAX_REQUESTS_PER_MINUTE=${MAX_REQUESTS_PER_MINUTE:-500}
+      - MAX_REQUESTS_PER_MINUTE=500
 
       # Token config
-      - ACCESS_TOKEN_EXPIRY=${ACCESS_TOKEN_EXPIRY:-24h}
-      - REFRESH_TOKEN_EXPIRY=${REFRESH_TOKEN_EXPIRY:-720h}
+      - ACCESS_TOKEN_EXPIRY=24h
+      - REFRESH_TOKEN_EXPIRY=720h
 
       # Indexing service config
-      - MAX_CONCURRENT_PARSING=${MAX_CONCURRENT_PARSING:-5}
-      - MAX_CONCURRENT_INDEXING=${MAX_CONCURRENT_INDEXING:-7}
+      - MAX_CONCURRENT_PARSING=5
+      - MAX_CONCURRENT_INDEXING=7
     depends_on:
       qdrant:
         condition: service_healthy
@@ -111,8 +110,8 @@ services:
     ports:
       - "27017:27017"
     environment:
-      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME:-admin}
-      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:-password}
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=qNo4qOE6xcNvLKIwSCV7XlOl
     volumes:
       - mongodb_data:/data/db
     healthcheck:
@@ -127,13 +126,11 @@ services:
     restart: always
     ports:
       - "6379:6379"
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     command: >
       sh -c "redis-server
       --appendonly yes
       --appendfsync everysec
-      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}"
+      --requirepass PpvDbMIryKqkHePYIyKTmPI0"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -149,11 +146,11 @@ services:
     ports:
       - "8529:8529"
     environment:
-      - ARANGO_ROOT_PASSWORD=${ARANGO_PASSWORD:-your_password}
+      - ARANGO_ROOT_PASSWORD=UxoR1H05HvlzesJIeo32sFLv
     volumes:
       - arango_data:/var/lib/arangodb3
     healthcheck:
-      test: ["CMD-SHELL", "arangosh --server.endpoint tcp://localhost:8529 --server.password '${ARANGO_PASSWORD:-your_password}' --javascript.execute-string 'db._version()' || exit 1"]
+      test: ["CMD-SHELL", "arangosh --server.endpoint tcp://localhost:8529 --server.password 'UxoR1H05HvlzesJIeo32sFLv' --javascript.execute-string 'db._version()' || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -230,7 +227,7 @@ services:
       - "6333:6333"
       - "6334:6334"
     environment:
-      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-your_qdrant_secret_api_key}
+      - QDRANT__SERVICE__API_KEY=2a51d8ddece9184c27eeab25539d0a36f45590a08f6a37ba
       # Performance optimizations
       - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=64
       - QDRANT__SERVICE__GRPC_PORT=6334
